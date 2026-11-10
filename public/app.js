@@ -354,6 +354,30 @@
   }));
   $("#helpBtn").addEventListener("click", () => send("/help"));
 
+  // logo → back to the start screen. Same as /new-topic on the server (topic and chat context
+  // are cleared; learning records and the weak-concept note are kept), then the welcome screen.
+  $("#homeBtn").addEventListener("click", async (e) => {
+    e.preventDefault();
+    switchTab("learn");
+    if (busy) { toast("응답을 받는 중이에요. 끝난 뒤 다시 눌러 주세요."); return; }
+    if (!store.learn.chat.length) { renderChat(); return; }
+    if (!confirm("지금 대화를 끝내고 처음 화면으로 돌아갈까요?\n학습 기록과 취약 개념 노트는 그대로 남아요.")) return;
+    if (store.learn.state) {
+      setBusy(true);
+      try {
+        const r = await api("/api/turn", turnBody("new_topic", "", store.learn.state));
+        store.learn.state = r.state; store.learn.progress = r.progress; store.learn.units = r.units;
+      } catch (err) {
+        toast("처음 화면으로 돌아가지 못했어요: " + err.message);
+        if (err.status === 401) openSettings();
+        return;
+      } finally { setBusy(false); }
+    }
+    store.learn.chat = [];
+    save(); renderChat(); renderSide();
+    input.value = ""; autosize(input); input.focus();
+  });
+
   // side panel
   function renderSide() {
     const p = store.learn.progress;
