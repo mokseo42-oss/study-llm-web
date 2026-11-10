@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STUDY — 학습 LLM</title>
+<meta name="description" content="사용자가 학습의 주체로 남도록 돕는 학습 LLM · SLA482 Section 1 Team 8">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231e3a5f'/><text x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='700'>S</text></svg>">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="/style.css">
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">S</span>
+    <div>
+      <div class="brand-name">STUDY</div>
+      <div class="brand-sub">학습의 주체로 남도록 돕는 학습 LLM</div>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="learn" role="tab">학습</button>
+    <button class="tab" data-tab="compare" role="tab">Baseline 비교</button>
+    <button class="tab" data-tab="lab" role="tab">시나리오 실험실</button>
+    <button class="tab" data-tab="records" role="tab">기록 · 피드백</button>
+  </nav>
+  <div class="top-actions">
+    <label class="switch" title="응답마다 [적용 규칙 / State / 판단 근거]를 보여 줘요">
+      <input type="checkbox" id="researcherToggle"><span class="slider"></span><span class="switch-label">연구자 모드</span>
+    </label>
+    <button class="icon-btn" id="settingsBtn" title="설정" aria-label="설정">⚙</button>
+  </div>
+</header>
+
+<div id="banner" class="banner hidden"></div>
+
+<main>
+  <!-- ============ 학습 ============ -->
+  <section class="panel active" id="tab-learn">
+    <div class="learn-grid">
+      <div class="chat-col">
+        <div class="chat" id="chat"></div>
+        <div class="composer">
+          <div class="quick-actions">
+            <button class="chip-btn" data-cmd="finish" title="/finish">마무리 점검</button>
+            <button class="chip-btn" data-cmd="new_topic" title="/new-topic">새 주제</button>
+            <button class="chip-btn" data-cmd="reset_chat" title="/reset-chat">대화 문맥 비우기</button>
+            <button class="chip-btn ghost" id="helpBtn" title="/help">명령어</button>
+          </div>
+          <form id="chatForm" class="input-row">
+            <textarea id="chatInput" rows="1" placeholder="공부하고 싶은 내용을 편하게 입력해 주세요 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
+            <button type="submit" class="send-btn" id="sendBtn">보내기</button>
+          </form>
+        </div>
+      </div>
+      <aside class="side-col">
+        <div class="card" id="progressCard">
+          <div class="card-head"><h3>학습 진행 상황</h3><span class="muted small" id="progressWhere"></span></div>
+          <div id="progressBody" class="progress-body"><p class="muted">주제를 정하면 하위 개념별 이해 상태가 여기에 표시돼요.</p></div>
+          <div class="legend">C 개념 이해 · R 이유 설명 · T 새 상황 적용 &nbsp; <span class="dot ok"></span>확인 <span class="dot part"></span>부분 <span class="dot miss"></span>보완 <span class="dot unk"></span>미확인</div>
+        </div>
+        <div class="card" id="vulnCard">
+          <div class="card-head"><h3>취약 개념 노트</h3><span class="tag">보조 규칙 2</span></div>
+          <div id="vulnBody"><p class="muted small">고친 오개념이 기록되면 다음 학습 단위의 첫 진단 질문에서 다른 상황으로 다시 확인해요.</p></div>
+        </div>
+        <div class="card research-only" id="sessionAuditCard">
+          <div class="card-head"><h3>이번 세션 규칙 검사</h3></div>
+          <div id="sessionAudit" class="small"></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ============ Baseline 비교 ============ -->
+  <section class="panel" id="tab-compare">
+    <div class="section-intro">
+      <h2>Baseline vs. Controlled</h2>
+      <p>같은 입력을 컨트롤러가 없는 일반 LLM(Baseline)과 STUDY 컨트롤러(Controlled)에 동시에 보내 응답을 나란히 비교해요. 같은 모델을 쓰기 때문에 차이는 컨트롤러 규칙에서 나와요. 중요한 장면은 <b>핵심 턴</b>으로 표시해 보고서 표로 내보낼 수 있어요.</p>
+    </div>
+    <div class="compare-grid">
+      <div class="compare-col">
+        <div class="col-head baseline">Baseline <span class="muted small">— Controller 미적용</span></div>
+        <div class="chat compact" id="chatBaseline"></div>
+      </div>
+      <div class="compare-col">
+        <div class="col-head controlled">Controlled <span class="muted small">— STUDY 컨트롤러</span></div>
+        <div class="chat compact" id="chatControlled"></div>
+      </div>
+    </div>
+    <form id="compareForm" class="input-row compare-input">
+      <textarea id="compareInput" rows="1" placeholder="두 모델에 같은 학습자 발화를 보내요"></textarea>
+      <button type="submit" class="send-btn" id="compareSend">둘 다 보내기</button>
+    </form>
+    <div class="row-actions">
+      <button class="btn" id="compareExport">보고서용 비교표 내보내기 (.md)</button>
+      <button class="btn ghost" id="compareReset">비교 대화 새로 시작</button>
+    </div>
+  </section>
+
+  <!-- ============ 실험실 ============ -->
+  <section class="panel" id="tab-lab">
+    <div class="section-intro">
+      <h2>시나리오 실험실</h2>
+      <p>Interim Demo 2의 검증 항목을 반복 실행으로 확인해요. ① 같은 답변에 State가 일관되게 판정되는가 ② 상태가 바뀔 때마다 근거가 있는가 ③ 답변 상태에 맞는 질문이 선택되는가 ④ 질문이 과도하게 반복되지 않는가. 한 번의 실행으로 일반화하지 않도록 같은 시나리오를 여러 번 돌려요.</p>
+    </div>
+    <div class="lab-grid">
+      <div class="card">
+        <label class="field-label" for="scenarioSelect">시나리오</label>
+        <select id="scenarioSelect"></select>
+        <p class="muted small" id="scenarioDesc"></p>
+        <label class="field-label" for="scenarioLines">학습자 발화 (한 줄 = 한 턴)</label>
+        <textarea id="scenarioLines" rows="9"></textarea>
+        <div class="lab-opts">
+          <label>반복 횟수 <input type="number" id="labRuns" min="1" max="5" value="3"></label>
+          <label><input type="checkbox" id="labBaseline"> Baseline도 함께 실행</label>
+          <label title="현재 학습 탭의 기록(취약 개념 포함)을 이어받아 실행해요. 등전위선처럼 '며칠 뒤' 시나리오에 사용"><input type="checkbox" id="labCarry"> 현재 학습 기록 이어받기</label>
+        </div>
+        <p class="muted small">예상 API 호출: 턴당 약 3~5회 × 반복 횟수. 실행 중에도 다른 탭은 사용할 수 있어요.</p>
+        <div class="row-actions">
+          <button class="btn primary" id="labRun">실행</button>
+          <button class="btn ghost" id="labStop" disabled>중지</button>
+        </div>
+        <div class="lab-progress" id="labProgress"></div>
+      </div>
+      <div class="card lab-results">
+        <div class="card-head"><h3>결과</h3>
+          <div class="row-actions tight">
+            <button class="btn small" id="labCsv" disabled>CSV</button>
+            <button class="btn small" id="labJson" disabled>JSON</button>
+          </div>
+        </div>
+        <div id="labMetrics" class="metrics"></div>
+        <div id="labMatrix" class="matrix-wrap"><p class="muted">실행하면 턴별 State·행동이 실행마다 어떻게 나왔는지 표로 보여 줘요.</p></div>
+        <div id="labTranscripts"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 기록 · 피드백 ============ -->
+  <section class="panel" id="tab-records">
+    <div class="records-grid">
+      <div class="card">
+        <div class="card-head"><h3>사용자 피드백 설문</h3><span class="tag">5-3 사용자 피드백</span></div>
+        <p class="muted small">학습을 해 본 뒤 작성해 주세요. 응답은 이 브라우저에 저장되고, 팀이 파일로 모아 보고서에 쓸 수 있어요.</p>
+        <form id="surveyForm" class="survey"></form>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>모은 피드백</h3></div>
+        <div id="feedbackSummary" class="small"></div>
+        <div class="row-actions">
+          <button class="btn" id="fbExport">피드백 내보내기 (.json)</button>
+          <label class="btn ghost file-btn">피드백 파일 합치기<input type="file" id="fbImport" accept=".json" multiple hidden></label>
+          <button class="btn" id="fbReport">보고서 초안 복사</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>학습 기록</h3><span class="tag">노트북 v3.13 호환</span></div>
+        <p class="muted small">브라우저에 자동 저장돼요. 내보낸 파일은 Colab 노트북의 <code>load_records()</code>로도 불러올 수 있고, 노트북에서 저장한 <code>study_llm_v3_13_records.json</code>도 여기서 불러올 수 있어요.</p>
+        <div class="row-actions">
+          <button class="btn" id="recExport">기록 내보내기</button>
+          <label class="btn ghost file-btn">기록 불러오기<input type="file" id="recImport" accept=".json" hidden></label>
+          <button class="btn" id="logCsv">대화 로그 CSV</button>
+          <button class="btn danger" id="recReset">전체 초기화</button>
+        </div>
+      </div>
+      <div class="card wide">
+        <div class="card-head"><h3>대화 로그 · 규칙 검사</h3><span class="muted small">[적용 규칙 / State / 판단 근거]</span></div>
+        <div id="auditSummary" class="metrics"></div>
+        <div id="logTable" class="table-wrap"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- settings -->
+<dialog id="settingsDialog">
+  <form method="dialog" class="dialog-body" id="settingsForm">
+    <h3>설정</h3>
+    <label class="field-label" for="setAccess">접근 코드</label>
+    <input id="setAccess" type="password" autocomplete="off" placeholder="팀이 공유한 코드 (설정된 경우만)">
+    <label class="field-label" for="setKey">OpenAI API 키 (선택)</label>
+    <input id="setKey" type="password" autocomplete="off" placeholder="비워 두면 서버에 설정된 키를 사용해요">
+    <p class="muted small">입력한 키는 이 브라우저에만 저장되고, 요청할 때만 서버로 전달돼요. 서버에 저장하지 않아요.</p>
+    <label class="field-label" for="setModel">모델</label>
+    <input id="setModel" placeholder="비워 두면 서버 기본값">
+    <p class="muted small" id="serverInfo"></p>
+    <div class="row-actions end">
+      <button value="cancel" class="btn ghost">닫기</button>
+      <button value="save" class="btn primary" id="settingsSave">저장</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="noteDialog">
+  <form method="dialog" class="dialog-body">
+    <h3 id="noteTitle">이 응답에 대한 메모</h3>
+    <textarea id="noteText" rows="4" placeholder="예: 이미 아는 내용을 다시 물어봤어요 / 힌트가 정답을 거의 알려 줬어요"></textarea>
+    <div class="row-actions end">
+      <button value="cancel" class="btn ghost">취소</button>
+      <button value="save" class="btn primary">저장</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.env*.local
+.vercel
+study_llm_v3_13_records.json
+node_modules/
