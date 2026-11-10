@@ -261,12 +261,13 @@
 
   function renderWelcome() {
     chatEl.innerHTML = `<div class="welcome">
-      <h1>무엇을 공부하고 싶으세요?</h1>
+      <span class="eyebrow">Study · Learner-led LLM</span>
+      <h1>무엇을 <em>공부</em>하고 싶으세요?</h1>
       <p>STUDY는 바로 설명하지 않아요. 먼저 지금 어떻게 이해하고 있는지 듣고, 그 답을 근거로 다음 질문과 설명 방식을 골라요.</p>
       <div class="principles">
-        <div class="principle"><b>P1 이해 상태 진단</b>개념·이유·적용(C·R·T)을 따로 확인하고, 근거가 없으면 상태를 정하지 않아요.</div>
-        <div class="principle"><b>P2 직접 설명·검증</b>빠진 요소 하나만 짚어 묻고, 대신 완성하지 않아요.</div>
-        <div class="principle"><b>P3 대화·학습 조정</b>같은 설명이 안 통하면 예시·비유·작은 단계로 바꿔요.</div>
+        <div class="principle"><span class="num">01</span><b>이해 상태 진단</b>개념·이유·적용(C·R·T)을 따로 확인하고, 근거가 없으면 상태를 정하지 않아요.</div>
+        <div class="principle"><span class="num">02</span><b>직접 설명·검증</b>빠진 요소 하나만 짚어 묻고, 대신 완성하지 않아요.</div>
+        <div class="principle"><span class="num">03</span><b>대화·학습 조정</b>같은 설명이 안 통하면 예시·비유·작은 단계로 바꿔요.</div>
       </div>
       <div class="starters">
         <button class="chip-btn" data-start="전기장이랑 전위가 어떻게 다른지 잘 모르겠어.">전기장과 전위가 헷갈려요</button>
