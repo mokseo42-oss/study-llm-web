@@ -17,7 +17,7 @@ if hasattr(time, "tzset"):
     time.tzset()
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -121,7 +121,8 @@ def index():
     page = PUBLIC / "index.html"
     if page.exists():
         return FileResponse(page)
-    return JSONResponse({"ok": True, "hint": "static files are served from public/"})
+    # On Vercel, public/ is served by the CDN (not bundled into the function)
+    return RedirectResponse("/index.html", status_code=307)
 
 
 # local development; on Vercel the public/ folder is served by the CDN
