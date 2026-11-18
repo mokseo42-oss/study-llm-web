@@ -2,10 +2,21 @@
 
 SLA482 Technoscience and the Public · Section 1 · Team 8
 
-Colab 노트북 `STUDY_LLM v3.13`의 컨트롤러를 그대로 옮겨 Vercel에 배포할 수 있게 만든 웹 앱입니다.
-상태 판정·행동 선택·프롬프트 등 컨트롤러 로직은 노트북과 같고, 노트북의 회귀 테스트(셀 5~8) 전체가 웹용 코어에서도 통과합니다.
+Colab 노트북 `STUDY_LLM v3.14`(Interim Demonstration 3 기준)의 컨트롤러를 그대로 옮겨 Vercel에 배포할 수 있게 만든 웹 앱입니다.
+상태 판정·행동 선택·프롬프트 등 컨트롤러 로직은 노트북과 같고, 노트북의 회귀 테스트(셀 5~9) 전체가 웹용 코어에서도 통과합니다.
 
-## 무엇이 추가됐나 (Interim Demo 2 · MVP 계획서 기준)
+## v3.14 · Interim Demo 3 반영 사항
+
+| 변경 | 근거 (Demo 3 자료) | 웹에서 |
+|---|---|---|
+| 개념마다 **C(개념) → R(이유) → T(적용)** 순서로 진행 (`PROGRESSION_MODE = "per_skill"`), 이유·적용 단계는 힌트 1번 뒤 부담 없이 다음으로 | 1절 반복적인 자기설명 요구, 5절 실패 사례 1, 6-1 C/R/T 진행 순서 | 진행 패널에 하위 개념별 현재 단계(개념/이유/적용/완료) 표시, 연구자 모드에 `이유 질문`·`적용 질문` 행동 표시 |
+| 핵심 용어 **한국어(English)** 병기 기본값, 대화 중 바꾸기 | 6-1 한영 용어 병기 등 학습 언어 선호 유지 | ‘학습 관리’ 패널에서 API 호출 없이 전환, 기록 파일에 `learner_prefs`로 저장 |
+| 프롬프트 간결화, 질문 구체화(시작 조건·답변 범위), 맞은 답 인정 후 다음 질문 | 6-1 프롬프트 간결화, 문제의 초기 조건과 답변 범위 구체화 | 코어 그대로 반영 |
+| `/reset-all`, 입력창 사라짐 대응, 빈 기록 자동 저장 방지 | 6-1 입력창 사라짐·세션 유지 오류, /help·학습 종료·초기화 안내 | `/reset-all` 명령 지원 (웹은 원래 입력창이 사라지지 않음) |
+| 조회용 명령어를 UI 패널로 | 6-3 슬래시 명령어의 UI 기능 전환 (시안) | 채팅 옆 ‘학습 관리’·‘학습 안내 · 명령어’ 패널: 진행 현황·명령어 목록·마무리/새 주제/문맥 비우기/내보내기를 LLM 호출 없이 처리 |
+| 스트레스 테스트·A/B 비교·실패 사례 | 3·4·5절 | 시나리오 실험실에 그대로 실행 가능한 시나리오로 추가 |
+
+## 기존 기능 (Interim Demo 2 · MVP 계획서 기준)
 
 | 탭 / 기능 | 문서 근거 | 내용 |
 |---|---|---|
@@ -17,7 +28,7 @@ Colab 노트북 `STUDY_LLM v3.13`의 컨트롤러를 그대로 옮겨 Vercel에 
 | **기록 · 피드백** | 5-3 사용자 피드백(작성 예정) | 원칙(P1·P2·P3, 보조 규칙 1, 검증 ④)에 맞춘 설문, 응답별 👍/👎/메모, 여러 테스터 파일 합치기, 보고서 5-3 초안 자동 작성 |
 | 학습 기록 | 노트북 `export_records` / `load_records` | 브라우저 자동 저장, 노트북과 같은 형식으로 내보내기/불러오기 (노트북 ↔ 웹 왕복 가능), 대화 로그 CSV, 규칙 검사 요약 |
 
-노트북 명령어(`/progress`, `/finish`, `/new-topic`, `/reset-chat`, `/export`, `/debug`, `/audit`, `/help`)도 입력창에서 그대로 쓸 수 있습니다.
+노트북 명령어(`/progress`, `/finish`, `/new-topic`, `/reset-chat`, `/reset-all`, `/export`, `/debug`, `/audit`, `/help`)도 입력창에서 그대로 쓸 수 있습니다.
 
 ## 구조
 
@@ -62,7 +73,7 @@ python tests/run_notebook_tests.py                    # 노트북 회귀 테스�
 노트북을 수정했다면 `notebook/`의 파일을 바꾸고 다시 생성하세요.
 
 ```bash
-python scripts/make_core.py notebook/STUDY_LLM_v3_13.ipynb study_core.py tests/notebook_cells_5_8.py
+python scripts/make_core.py notebook/STUDY_LLM_v3_14.ipynb study_core.py tests/notebook_cells_5_9.py
 python tests/run_notebook_tests.py
 ```
 

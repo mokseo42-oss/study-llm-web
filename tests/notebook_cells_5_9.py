@@ -1,5 +1,9 @@
 import inspect
 
+# v3.13 회귀 테스트(셀 5~8)는 개념 우선(concept_first) 방식으로 실행하고, v3.14 단계별(per_skill) 테스트는 마지막 테스트 셀에서 따로 실행한다.
+_SAVED_PROGRESSION_MODE = PROGRESSION_MODE
+PROGRESSION_MODE = "concept_first"
+
 # v3.10 regression tests: preserve controller invariants + verify complete startup state machine
 
 def run_v310_controller_regression_tests():
@@ -488,7 +492,7 @@ class _FakeLLM:
             out = "원리: 성분별 이동 속도 차이로 분리돼요. 암기법: 흐름을 먼저 외워 보세요."
         elif "answering the learner's explicit request" in ins:
             out = "1. 크로마토그래피의 원리를 설명하시오.\n2. 고정상과 이동상의 차이는?\n3. Rf값 정의는?\n4. 머무름 시간은?\n5. 분리 예시를 쓰시오."
-        elif ins == START_CONFIRM_PROMPT:
+        elif ins.startswith(START_CONFIRM_PROMPT):
             out = "크로마토그래피가 무엇인지 어떻게 설명할 수 있나요?"
         elif ins.startswith(RESPONSE_PROMPT[:60]) and "Rewrite as a SINGLE-STEP hint" in ins:
             self.rewrites = getattr(self, "rewrites", 0) + 1
@@ -946,7 +950,7 @@ def v313_review_session_and_queue_test():
         good = {"concept": "confirmed", "concept_source": "independent_explanation", "has_content_attempt": True}
         # State1/2에서 맞으면 새 상황 한 문제를 더 묻고(안정적 이해로 올라갈 기회), 그다음에 마무리
         assert choose_action(rec, "continue", good) == "review" and rec["review_session"].get("extra")
-        assert "안정적 이해" in _build_action_instruction("review", rec, "continue", {})
+        assert "판정하는 말은 하지 마세요" in _build_action_instruction("review", rec, "continue", {})   # v3.14.1: 판정 말투 대신 가벼운 질문
         assert choose_action(rec, "continue", good) == "review_done"
         assert choose_action(rec, "continue", good) == "closing_ack"
         # 이미 State3이면 추가 질문 없이 바로 마무리
@@ -1036,8 +1040,8 @@ def v313_progress_query_and_commands_test():
         assert "퀴즈" in ins and "confirmed_skills" in ins
         assert _rule_check("괜찮아요.", "progress_report", "State3", "State3", rec)["questions_ok"]
     import inspect
-    src = inspect.getsource(run_chat)
-    assert "cmd = user_input.lower()" in src and 'user_input == "/' not in src       # /PROGRESS 같은 대문자도 명령으로 인식
+    src = inspect.getsource(handle_command)      # v3.14: 명령 처리는 handle_command로 분리됨
+    assert "cmd = user_input.strip().lower()" in src and 'user_input == "/' not in src       # /PROGRESS 같은 대문자도 명령으로 인식
     print("v3.13 progress-query / case-insensitive commands: 5/5 passed")
 
 
@@ -1052,7 +1056,7 @@ def v313_help_command_test():
     out = buf.getvalue()
     for c in ("/progress", "/finish", "/new-topic", "/reset-chat", "/export", "/load", "/debug", "/audit", "/exit"):
         assert c in out
-    src = inspect.getsource(run_chat)
+    src = inspect.getsource(handle_command)
     assert 'cmd == "/help"' in src and "/help로 명령어를 확인하세요" not in src
     print("v3.13 /help command: 3/3 passed")
 
@@ -1062,12 +1066,12 @@ v313_help_command_test()
 
 def v313_help_and_vulnerability_test():
     import inspect
-    src = inspect.getsource(run_chat)
+    src = inspect.getsource(handle_command)
     assert 'cmd == "/help"' in src and "print_help()" in src
     names = [c for c, _ in COMMAND_HELP]
     for c in ("/progress", "/finish", "/new-topic", "/reset-chat", "/export", "/load", "/debug", "/audit", "/exit"):
         assert c in names and all(d for n, d in COMMAND_HELP if n == c)      # 모든 명령에 설명이 있다
-    assert "/help" not in src.split("while True")[0]            # 시작 문구에는 /help 안내가 없다
+    assert any("/help" in line for line in INTRO_LINES)         # v3.14 피드백: 시작 문구에서 /help를 알려 준다
     out = _quiet(print_help)
     assert "/progress" in out and "State" not in out
     rec = _new_record()
@@ -1108,7 +1112,7 @@ def v313_log3_fixes_test():
         assert "새 사례" not in _build_action_instruction("wrap_up_check", rec, "continue", {})
         # 시작 문구에 버전이 없다
         import inspect
-        assert 'STUDY LLM 시작.' in inspect.getsource(run_chat) and "APP_VERSION" not in inspect.getsource(run_chat)
+        assert INTRO_LINES[0].startswith('STUDY LLM 시작.') and "APP_VERSION" not in inspect.getsource(_show_intro) + inspect.getsource(run_chat)
         # 패널: 개념이 부분 확인인데 '개념 확인됨'이라고 하지 않는다
         rec["skill_records"]["a"]["dimensions"] = {"concept": "partial", "reasoning": "unknown", "transfer": "unknown"}
         html_out = _progress_panel_html(rec)
@@ -1196,3 +1200,523 @@ def v313_vulnerability_no_misconception_test():
 
 
 v313_vulnerability_no_misconception_test()
+
+
+# v3.14 tests: 조원 피드백 반영 (입력창 대응, 시작 안내, 맞힌 개념 재정리, 복습 방식, 용어 병기 선호, 질문 구체화, 프롬프트 간결화)
+def v314_term_style_detection_test():
+    yes = ["영어로도 같이 표기해 줘", "영어 용어도 같이 알려줘", "한영 병기로 부탁해", "영문 표기도 괄호로 써 줘", "영어도 함께 보여줘"]
+    no = ["영어로 설명해 줘", "화학 용어 영어로 뭐야?", "영어로만 대화하자", "상경계가 뭐야?", "잘 모르겠어요"]
+    for t in yes:
+        assert _detect_term_style(t) == "bilingual", t
+    for t in no:
+        assert _detect_term_style(t) is None, t
+    assert _detect_term_style("한국어로만 써 줘") == "korean"
+    print("v3.14 term-style detection: 11/11 passed")
+
+
+v314_term_style_detection_test()
+
+
+def v314_term_preference_flow_test():
+    import os, tempfile, json as _json
+    path = os.path.join(tempfile.mkdtemp(), "prefs.json")
+    saved_pref = dict(learner_prefs)
+    try:
+        with _scenario_sandbox() as fake:
+            learner_prefs["term_style"] = "korean"
+            captured = []
+            _orig = fake.create
+            def _spy(**kw):
+                captured.append(kw)
+                return _orig(**kw)
+            with patch.object(client.responses, "create", side_effect=_spy):
+                rec = _start_unit(fake)
+                fake.queue(**_ev("chroma_def", **_NO))
+                out = _quiet(study_turn, "영어로도 같이 표기해 줘")        # 대화 중에도 선호를 바꿀 수 있고, 한 줄로 알려 준다
+                assert "한국어(English)" in out and "하던 내용은 그대로" in out      # v3.14.1: 설정 변경은 평가·새 질문 없이 하던 질문을 잇는다
+                assert not fake.response_inputs                                      # LLM 응답을 부르지 않는다
+                _quiet(study_turn, "음 잘 모르겠어요")                                 # 다음 일반 턴에서 선호가 전달된다
+            assert learner_prefs["term_style"] == "bilingual"
+            assert fake.response_inputs[-1]["learner_preferences"]["term_style"] == "bilingual"   # 이후 응답에 계속 전달
+            assert "TERM STYLE" in _pref_instruction()
+            # 저장 → 불러오기 후에도 유지
+            _quiet(export_records, path, True)
+            assert _json.load(open(path, encoding="utf-8"))["learner_prefs"]["term_style"] == "bilingual"
+            learner_prefs["term_style"] = "korean"
+            _quiet(load_records, path)
+            assert learner_prefs["term_style"] == "bilingual"
+        # 새 하위 개념 목록은 한국어(English) 라벨로 만들도록 요청한다
+        with _scenario_sandbox() as fake:
+            learner_prefs["term_style"] = "bilingual"
+            seen = []
+            _orig2 = fake.create
+            def _spy2(**kw):
+                seen.append(kw.get("input", ""))
+                return _orig2(**kw)
+            with patch.object(client.responses, "create", side_effect=_spy2):
+                learning_context.update({"topic": "상평형도", "goal": "이해", "concept_id": "phase"})
+                initialize_skill_registry(_record())
+            assert any("LABEL LANGUAGE" in x for x in seen)
+            learner_prefs["term_style"] = "korean"
+            seen.clear()
+            with patch.object(client.responses, "create", side_effect=_spy2):
+                concept_records["phase"]["registry_locked"] = False
+                concept_records["phase"]["skill_registry"] = {}
+                initialize_skill_registry(_record())
+            assert not any("LABEL LANGUAGE" in x for x in seen)
+    finally:
+        learner_prefs.clear(); learner_prefs.update(saved_pref)
+    print("v3.14 term-style preference flow: 8/8 passed")
+
+
+v314_term_preference_flow_test()
+
+
+def v314_recap_after_correct_answer_test():
+    with _scenario_sandbox() as fake:
+        rec = _start_unit(fake)
+        fake.queue(**_ev("chroma_def", **_IND, key_points_covered=2))
+        _quiet(study_turn, "여러 성분이 섞인 혼합물을 성분 특성 차이로 분리하는 방법")
+        assert logs[-1]["next_action"] == "advance_next" and logs[-1]["closed_how"] == "confirmed"
+        ctx = fake.response_inputs[-1]
+        assert ctx["confirmed_key_points"] == ["혼합물 분리 방법", "성분 특성 차이 이용"]      # 재정리에 쓸 핵심만 전달
+        assert "실제로 말한 맞은 핵심" in ctx["action_instruction"] and "새 개념이나 조건은 덧붙이지 마세요" in ctx["action_instruction"]
+        # 넘기기를 요청한 개념은 재정리하지 않는다 (확인된 적이 없으므로)
+        fake.queue(**_ev("phases", intent="skip_check", **_NO))
+        _quiet(study_turn, "이건 아니까 넘겨줘")
+        ctx = fake.response_inputs[-1]
+        assert "confirmed_key_points" not in ctx and "실제로 말한 맞은 핵심만" not in ctx["action_instruction"]
+        # 마무리로 넘어가는 마지막 개념도 맞은 답이면 재정리 지시가 붙는다
+        rec["active_skill_id"] = "rf_values"
+        for sid in ("phases", "separation"):
+            rec["skill_records"][sid]["closed"] = "skipped"
+        fake.queue(**_ev("rf_values", **_IND, key_points_covered=2))
+        _quiet(study_turn, "Rf는 이동 거리 비")
+        assert logs[-1]["next_action"] == "wrap_up_check"
+        assert "다시 정리" in fake.response_inputs[-1]["action_instruction"]
+    print("v3.14 recap after a correct answer: 6/6 passed")
+
+
+v314_recap_after_correct_answer_test()
+
+
+def v314_review_recap_first_test():
+    with _scenario_sandbox() as fake:
+        rec = _record()
+        rec["skill_registry"] = {"a": "개념A"}
+        rec["skill_records"] = {"a": _new_skill_record("개념A", ["x", "y"])}
+        rec["unit_status"] = "completed"; rec["skill_records"]["a"]["closed"] = "confirmed"
+        rec["skill_records"]["a"]["state"] = "State1"
+        learning_context.update({"topic": "t", "goal": "g"})
+        assert choose_action(rec, "review", {}) == "review"
+        ins = _build_action_instruction("review", rec, "review", {})
+        assert "먼저 '개념A'의 핵심을 explain_key_points" in ins and "다시 평가받는 느낌" in ins     # 먼저 짧게 정리, 그다음 쉬운 확인 질문
+        assert "쉬운 확인 질문 하나만" in ins and "다시 설명해 보세요" in ins                      # 재설명 요구 금지 문장 포함
+        assert _limit_for("review", rec) == MAX_EXPLAIN_CHARS                                   # 정리 + 질문이 들어갈 길이
+        # 복습 응답 context에는 정리에 쓸 핵심이 전달된다
+        rec["active_skill_id"] = "a"
+        fake_ctx = []
+        out = _make_response("복습할래", "review", rec, _neutral_assessment(rec, "review"), "review")
+        assert fake.response_inputs[-1]["explain_key_points"] == ["x", "y"]
+    print("v3.14 review recap-first: 6/6 passed")
+
+
+v314_review_recap_first_test()
+
+
+def v314_question_specificity_test():
+    with _scenario_sandbox() as fake:
+        rec = _record()
+        rec["skill_registry"] = {"a": "개념A"}
+        rec["skill_records"] = {"a": _new_skill_record("개념A", ["x", "y"])}
+        rec["active_skill_id"] = "a"
+        for act in ("diagnostic_question", "guided_question", "advance_next", "wrap_up_check"):
+            rec["transition"] = {"closed_label": "B", "how": "confirmed"} if act == "advance_next" else None
+            rec["wrap_target"] = {"skill_id": "a", "label": "개념A", "dimension": "concept", "reason": "unconfirmed"}
+            ins = _build_action_instruction(act, rec, "continue", {})
+            assert "처음 상태와 조건" in ins and "한 가지 뜻으로만 읽히게" in ins, act
+    assert _limit_for("guided_question", {}) == MAX_QUESTION_CHARS > MAX_HINT_CHARS
+    assert _limit_for("hint", {}) == MAX_HINT_CHARS                 # 힌트는 여전히 짧게
+    assert "250자" in _build_action_instruction("guided_question", {"skill_records": {}, "transition": None}, "continue", {})
+    assert "Specific enough to read only one way" in RESPONSE_PROMPT
+    assert _limit_for("reasoning_question", {}) == MAX_STAGE_CHARS > MAX_QUESTION_CHARS      # 인정+정리+질문이 잘리지 않는다
+    assert _limit_for("advance_next", {"transition": {"how": "confirmed"}}) == MAX_STAGE_CHARS
+    print("v3.14 question specificity: 8/8 passed")
+
+
+v314_question_specificity_test()
+
+
+def v314_prompt_slimming_test():
+    assert len(EVALUATOR_PROMPT) < 11000 and len(RESPONSE_PROMPT) < 5000 and len(START_ROUTER_PROMPT) < 3000
+    for must in ("INTENT", "SKILL ROUTING", "DIMENSIONS", "SOURCES", "MISCONCEPTION", "ai_echo", "hint_assisted", "pause_session", "__UNMAPPED__", "KOREAN"):
+        assert must in EVALUATOR_PROMPT, must
+    for must in ("TONE", "LENGTH", "QUESTIONS", "HELP", "CLAIMS", "learner_preferences", "Never mention internal terms"):
+        assert must in RESPONSE_PROMPT, must
+    assert "Naming the concept being asked about" in EVALUATOR_PROMPT and "independent_explanation" in EVALUATOR_PROMPT   # 개념 이름만 말한 질문은 힌트가 아님
+    assert EVALUATOR_PROMPT[:60] != RESPONSE_PROMPT[:60]
+    print("v3.14 prompt slimming / required rules kept: 18/18 passed")
+
+
+v314_prompt_slimming_test()
+
+
+def v314_input_box_and_intro_test():
+    import sys, types
+    # 시작 안내
+    joined = "\n".join(INTRO_LINES)
+    for k in ("/help", "/new-topic", "/exit", "/reset-all", "다시 실행"):
+        assert k in joined, k
+    # /reset-all 은 확인 없이는 지우지 않는다
+    with _scenario_sandbox() as fake:
+        rec = _record(); learning_context.update({"topic": "t", "goal": "g"})
+        out = _quiet(handle_command, "/reset-all")
+        assert "confirm" in out and learning_context["topic"] == "t" and concept_records
+        _quiet(handle_command, "/reset-all confirm")
+        assert learning_context["topic"] == "" and not concept_records and learning_phase == "idle"
+    # 위젯 입력창: 한 턴에서 오류가 나도 입력창이 살아 있고, /exit 후에는 닫힌다
+    class _HTMLW:
+        def __init__(self, **kw): self.value = kw.get("value", "")
+    class _W:
+        def __init__(self, **kw):
+            self.value = kw.get("value", ""); self.disabled = False
+        def on_submit(self, f): self.sub = f
+        def on_click(self, f): self.clk = f
+    fakew = types.ModuleType("ipywidgets")
+    fakew.HTML = _HTMLW; fakew.Text = _W; fakew.Button = _W
+    fakew.Layout = lambda **k: k; fakew.VBox = lambda c: c; fakew.HBox = lambda c: c
+    old = sys.modules.get("ipywidgets")
+    sys.modules["ipywidgets"] = fakew
+    calls = []
+    try:
+        g = globals()
+        orig_turn = g["study_turn"]
+        orig_export = g["export_records"]
+        g["export_records"] = lambda *a, **k: None          # 테스트가 실제 저장 파일을 덮어쓰지 않게 한다
+        def boom(text, forced_intent=None):
+            calls.append(text)
+            if text == "오류":
+                raise RuntimeError("x")
+        g["study_turn"] = boom
+        try:
+            ui = _run_chat_widget()
+            box, btn = ui["box"], ui["btn"]
+            for msg in ("안녕", "오류", "다음"):
+                box.value = msg; ui["submit"]()
+                assert box.value == "" and not box.disabled and not btn.disabled      # 오류 뒤에도 입력창이 다시 열린다
+            assert calls == ["안녕", "오류", "다음"]
+            joined_out = ui["view"].value
+            assert "You: 안녕" in joined_out and "오류가 났어요" in joined_out        # 입력과 출력이 같은 기록 위젯에 쌓인다
+            assert "답변을 만드는 중" not in joined_out                                # 턴이 끝나면 대기 표시는 사라진다
+            assert sys.stdout is not None and globals()["display"] is _ORIG_DISPLAY       # 턴이 끝나면 stdout/display를 원래대로 돌려 둔다
+            box.value = "/help"; ui["submit"]()
+            assert calls == ["안녕", "오류", "다음"]                                    # 명령어는 학습 턴으로 가지 않는다
+            box.value = "/exit"; ui["submit"]()
+            box.value = "닫힌 뒤"; ui["submit"]()
+            assert calls == ["안녕", "오류", "다음"]
+            # ipywidgets가 없으면 input() 방식으로 대체한다
+            del sys.modules["ipywidgets"]
+            sys.modules["ipywidgets"] = None
+            ran = []
+            g_loop = g["_run_chat_loop"]; g["_run_chat_loop"] = lambda: ran.append(1)
+            try:
+                _quiet(run_chat)
+            finally:
+                g["_run_chat_loop"] = g_loop
+            assert ran == [1]
+        finally:
+            g["study_turn"] = orig_turn
+            g["export_records"] = orig_export
+    finally:
+        if old is None:
+            sys.modules.pop("ipywidgets", None)
+        else:
+            sys.modules["ipywidgets"] = old
+    print("v3.14 input box / intro / reset-all: 14/14 passed")
+
+
+v314_input_box_and_intro_test()
+
+
+def v314_default_bilingual_and_topic_switch_test():
+    assert DEFAULT_TERM_STYLE == "bilingual" and "bilingual" in RESPONSE_PROMPT
+    with _scenario_sandbox() as fake:
+        saved = dict(learner_prefs)
+        try:
+            learner_prefs["term_style"] = DEFAULT_TERM_STYLE
+            rec = _start_unit(fake)
+            # 요청 없이도 응답 context에 용어 병기 선호가 전달된다
+            fake.queue(**_ev("chroma_def", **_NO, learner_stuck=True))
+            _quiet(study_turn, "음... 잘 모르겠어요")
+            assert fake.response_inputs[-1]["learner_preferences"]["term_style"] == "bilingual"
+            # "한국어로만"이라고 하면 끈다
+            out = _quiet(study_turn, "용어는 한국어로만 써 줘")        # v3.14.1: 설정 변경만 한 입력은 평가를 건너뛴다
+            assert learner_prefs["term_style"] == "korean" and "한국어로만" in out and "하던 내용은 그대로" in out
+            # 학습 중에 완전히 다른 주제를 말하면 현재 질문의 답으로 받지 않고 새 학습 단위를 시작한다
+            fake.router_script = lambda t: {"topic": "활성화에너지", "goal": "활성화에너지 이해", "needs_clarification": False,
+                                            "clarification_question": "", "intent": "structured_learning", "direct_request": ""}
+            fake.queue(**_ev("chroma_def", **_NO, intent="change_goal", topic_detected="활성화에너지"))
+            out = _quiet(study_turn, "활성화에너지에 대해 알고 싶어")
+            assert learning_context["topic"] == "활성화에너지" and learning_phase == "awaiting_registry_confirmation"
+            assert "학습 주제: 활성화에너지" in out
+            # 같은 주제를 가리키는 change_goal(목표만 바꿈)은 새 단위로 취급하지 않는다
+            fake.router_script = lambda t: {"topic": "활성화에너지", "goal": "x", "needs_clarification": False,
+                                            "clarification_question": "", "intent": "structured_learning", "direct_request": ""}
+            fake.classifier_script = lambda t: {"decision": "confirm", "revision_request": "", "reason": ""}
+            _quiet(study_turn, "좋아요")
+            before = learning_context["concept_id"]
+            fake.queue(**_ev("chroma_def", **_NO, intent="change_goal", topic_detected="활성화에너지의 의미"))
+            _quiet(study_turn, "활성화에너지의 의미 위주로 해줘")
+            assert learning_context["concept_id"] == before
+        finally:
+            learner_prefs.clear(); learner_prefs.update(saved)
+    print("v3.14 default bilingual / topic switch from evaluator: 9/9 passed")
+
+
+v314_default_bilingual_and_topic_switch_test()
+
+
+def v314_autosave_guard_and_panel_test():
+    import os, tempfile, inspect
+    # 학습 기록이 없을 때는 저장하지 않는다 (이전 저장 파일을 빈 기록으로 덮어쓰지 않는다)
+    global SAVE_FILE
+    old_save = SAVE_FILE
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "save.json")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"keep": true}')
+    saved_records = dict(concept_records)
+    try:
+        concept_records.clear()
+        _orig_export = export_records
+        def _export_to_tmp(filename=path, quiet=False):
+            return _orig_export(path, quiet)
+        globals()["export_records"] = _export_to_tmp
+        try:
+            _autosave()
+            assert open(path, encoding="utf-8").read() == '{"keep": true}'        # 빈 기록은 저장하지 않음
+            concept_records["x"] = {"skill_registry": {"a": "A"}, "skill_records": {}}
+            _autosave()
+            assert open(path, encoding="utf-8").read() != '{"keep": true}'        # 기록이 생기면 저장
+        finally:
+            globals()["export_records"] = _orig_export
+        # 저장 파일이 있고 메모리가 비어 있으면 시작 안내에서 /load를 알려 준다
+        concept_records.clear()
+        SAVE_FILE = path
+        assert "/load" in _quiet(_show_intro)
+    finally:
+        SAVE_FILE = old_save
+        concept_records.clear(); concept_records.update(saved_records)
+    # /progress 카드는 어두운 테마에서도 읽히도록 글자색과 배경을 고정한다
+    src = inspect.getsource(_progress_panel_html)
+    assert "background:#ffffff;color:#1f2937" in src and "var(--jp" not in src
+    print("v3.14 autosave guard / progress panel colors: 5/5 passed")
+
+
+v314_autosave_guard_and_panel_test()
+
+
+# ---------------------------------------------------------------------------
+# v3.14 per_skill(개념마다 C → R → T) 시나리오 테스트
+# ---------------------------------------------------------------------------
+def v314_per_skill_progression_test():
+    global PROGRESSION_MODE
+    old_mode = PROGRESSION_MODE
+    PROGRESSION_MODE = "per_skill"
+    try:
+        with _scenario_sandbox() as fake:
+            PROGRESSION_MODE = "per_skill"          # 샌드박스가 기본값으로 되돌려도 이 테스트는 per_skill
+            rec = _start_unit(fake)
+            s1 = rec["skill_records"]["chroma_def"]
+            # 1) C가 독립적으로 확인되면 바로 다음 개념으로 가지 않고 이유(R)를 묻는다
+            fake.queue(**_ev("chroma_def", **_IND, key_points_covered=2))
+            _quiet(study_turn, "여러 성분이 섞인 혼합물을 성분 특성 차이로 분리하는 방법")
+            assert logs[-1]["next_action"] == "reasoning_question" and s1["stage"] == "R"
+            assert rec["active_skill_id"] == "chroma_def" and not s1["closed"]
+            ctx = fake.response_inputs[-1]
+            assert ctx["confirmed_key_points"] == ["혼합물 분리 방법", "성분 특성 차이 이용"] and ctx["transition"]["stage_to"] == "R"
+            assert "이유" in ctx["action_instruction"] and "일상적인 말" in ctx["action_instruction"]
+            assert rec["active_task"]["kind"] == "reasoning_question"          # 평가기가 이 질문을 기준으로 다음 답을 본다
+            # 2) 이유 답이 '어느 정도' 맞으면(partial) 인정하고 적용(T)으로 넘어간다 (관대한 판정)
+            fake.queue(**_ev("chroma_def", r="partial", rs="independent_explanation"))
+            _quiet(study_turn, "성분마다 이동하는 속도가 달라서 같이 안 움직여서요")
+            assert logs[-1]["next_action"] == "transfer_question" and s1["stage"] == "T"
+            assert fake.response_inputs[-1]["transition"]["from_stage"] == "R"
+            assert "후하게" in fake.response_inputs[-1]["action_instruction"]
+            # 3) 적용 답이 맞으면 개념을 닫고 다음 개념으로
+            fake.queue(**_ev("chroma_def", t="confirmed", ts="independent_transfer"))
+            _quiet(study_turn, "잉크 성분이면 번지는 속도가 달라 띠로 나뉘겠죠")
+            assert logs[-1]["next_action"] == "advance_next" and s1["closed"] == "confirmed" and s1["stage"] == "done"
+            assert rec["active_skill_id"] == "phases" and s1["dimensions"]["reasoning"] in ("partial", "confirmed")
+            # 4) 다음 개념에서 C·R이 한 번에 확인되면 R 단계는 건너뛰고 T로 간다
+            fake.queue(**_ev("phases", **_IND, r="confirmed", rs="independent_explanation", key_points_covered=2))
+            _quiet(study_turn, "고정상은 성분을 붙잡고 이동상이 실어 나르니까 친화력이 센 건 느려요")
+            assert logs[-1]["next_action"] == "transfer_question" and rec["skill_records"]["phases"]["stage"] == "T"
+            # 5) 적용 단계에서 막히면: 힌트 1번 → 그래도 어려우면 부담 없이 넘어간다
+            fake.queue(**_ev("phases", **_NO, learner_stuck=True))
+            _quiet(study_turn, "모르겠어요")
+            assert logs[-1]["next_action"] == "hint" and rec["skill_records"]["phases"]["stage_hints"] == 1
+            fake.queue(**_ev("phases", **_NO, learner_stuck=True))
+            _quiet(study_turn, "그래도 모르겠어요")
+            assert logs[-1]["next_action"] == "advance_next" and logs[-1]["closed_how"] == "moved_on"
+            ph = rec["skill_records"]["phases"]
+            assert ph["deepen_incomplete"] and ph["closed"] == "confirmed" and rec["active_skill_id"] == "separation"
+            assert "이유와 적용은 여기까지" in fake.response_inputs[-1]["action_instruction"]
+            # 6) 힌트를 받고 답하면(hint_assisted) 인정하고 진행한다 (엄격하게 독립 근거를 요구하지 않는다)
+            fake.queue(**_ev("separation", **_IND, key_points_covered=2))
+            _quiet(study_turn, "성분별로 이동 속도가 달라서 분리돼요")
+            assert logs[-1]["next_action"] == "reasoning_question"
+            fake.queue(**_ev("separation", **_NO, learner_stuck=True))
+            _quiet(study_turn, "음 모르겠어요")
+            assert logs[-1]["next_action"] == "hint"
+            fake.queue(**_ev("separation", r="confirmed", rs="hint_assisted"))
+            _quiet(study_turn, "상이랑 얼마나 잘 붙는지가 다르니까요")
+            assert logs[-1]["next_action"] == "transfer_question"
+            # 7) 이유 단계에서 AI 말을 따라 한 답(ai_echo)은 인정하지 않는다
+            rec["skill_records"]["separation"]["stage"] = "R"
+            fake.queue(**_ev("separation", r="confirmed", rs="ai_echo"))
+            _quiet(study_turn, "상이랑 얼마나 잘 붙는지가 다르니까요")
+            assert logs[-1]["next_action"] in ("hint", "advance_next") and logs[-1]["next_action"] != "transfer_question"
+        assert all(l["rule_check"]["questions_ok"] for l in logs) if logs else True
+    finally:
+        PROGRESSION_MODE = old_mode
+    print("v3.14 per_skill C→R→T progression: 22/22 passed")
+
+
+v314_per_skill_progression_test()
+
+
+def v314_per_skill_wrapup_and_state3_test():
+    global PROGRESSION_MODE
+    old_mode = PROGRESSION_MODE
+    try:
+        with _scenario_sandbox() as fake:
+            PROGRESSION_MODE = "per_skill"
+            rec = _start_unit(fake)
+            # C·R·T를 서로 다른 턴에 독립적으로 확인하면 State3까지 오른다
+            fake.queue(**_ev("chroma_def", **_IND, key_points_covered=2)); _quiet(study_turn, "혼합물 분리")
+            fake.queue(**_ev("chroma_def", r="confirmed", rs="independent_explanation")); _quiet(study_turn, "성분 특성이 달라서")
+            fake.queue(**_ev("chroma_def", t="confirmed", ts="independent_transfer")); _quiet(study_turn, "잉크는 띠로 나뉘어요")
+            assert rec["skill_records"]["chroma_def"]["state"] == "State3" and rec["skill_records"]["chroma_def"]["closed"] == "confirmed"
+            # 나머지 개념은 건너뛰고 마무리: R·T는 이미 단계마다 물었으므로 마무리 큐에서 다시 묻지 않는다
+            for sid in ("phases", "separation", "rf_values"):
+                rec["skill_records"][sid]["closed"] = "confirmed"
+                rec["skill_records"][sid]["dimensions"]["concept"] = "confirmed"
+                rec["skill_records"][sid]["state"] = "State2"
+            q = _build_wrap_up_queue(rec)
+            assert q == []                                                    # 확인된 개념의 R·T를 되풀이해서 묻지 않음
+            # concept_first(v3.13)에서는 예전처럼 R·T를 마무리에서 묻는다
+            PROGRESSION_MODE = "concept_first"
+            assert [x["dimension"] for x in _build_wrap_up_queue(rec)] == ["reasoning_transfer"] * 3
+            PROGRESSION_MODE = "per_skill"
+            # 오개념이 있었던 개념은 마무리에서 다시 확인한다
+            rec["skill_records"]["phases"]["misconceptions"] = [{"turn_id": 1, "note": "x"}]
+            assert [x["skill_id"] for x in _build_wrap_up_queue(rec)] == ["phases"]
+        # 평가기 프롬프트: 이유·적용에는 관대한 기준을 쓰고, 현재 단계를 context로 받는다
+        assert "LENIENT for reasoning and transfer" in EVALUATOR_PROMPT and "active_stage" in EVALUATOR_PROMPT
+        with _scenario_sandbox() as fake:
+            PROGRESSION_MODE = "per_skill"
+            rec = _start_unit(fake)
+            seen = []
+            _o = fake.create
+            def _spy(**kw):
+                seen.append(kw.get("input", ""))
+                return _o(**kw)
+            with patch.object(client.responses, "create", side_effect=_spy):
+                fake.queue(**_ev("chroma_def", **_IND, key_points_covered=2)); _quiet(study_turn, "혼합물 분리")
+                fake.queue(**_ev("chroma_def", r="partial", rs="independent_explanation")); _quiet(study_turn, "음 그냥 달라서")
+            assert any('"active_stage": "R"' in x for x in seen)
+    finally:
+        PROGRESSION_MODE = old_mode
+    print("v3.14 per_skill wrap-up queue / State3 / evaluator stage: 9/9 passed")
+
+
+v314_per_skill_wrapup_and_state3_test()
+
+def v314_question_targeting_test():
+    """오개념·힌트 질문이 일반 진단 틀('아는 것 두세 개')로 되돌아가지 않고 구체적으로 묻는다."""
+    base = {"skill_records": {}, "transition": None}
+    dm = _build_action_instruction("diagnose_misconception", base, "continue", {})
+    assert "학습자의 표현 그대로" in dm and "두세 개를 골라 설명'하게 하세요" not in dm.replace("쓰지 마세요", "")
+    assert "넓은 질문은 쓰지 마세요" in dm
+    hn = _build_action_instruction("hint", base, "continue", {})
+    assert "필요한 전제" in hn and "짧게 인정" in hn
+    for act in ("diagnostic_question", "advance_next", "reveal_and_next"):
+        assert "두세 개를 골라 설명" in _build_action_instruction(act, base, "continue", {}), act
+    for act in ("guided_question", "reasoning_question", "transfer_question", "hint"):
+        assert "두세 개를 골라 설명" not in _build_action_instruction(act, base, "continue", {}), act
+    rv = _build_action_instruction("reveal_and_next", {"skill_records": {}, "transition": {"how": "revealed", "closed_label": "x"}}, "continue", {})
+    assert "misconception_to_correct" in rv and "괜찮아요" in rv and "구체적으로" in rv
+    cf = _build_action_instruction("advance_next", {"skill_records": {}, "transition": {"how": "confirmed", "closed_label": "x"}}, "continue", {})
+    assert "같은 말을 두 번 하지 마세요" in cf
+    print("v3.14 question targeting / no-repeat recap: 9/9 passed")
+
+
+v314_question_targeting_test()
+
+def v314_review_target_test():
+    """정답이 공개된 적 있어도 State3으로 확인된 개념은 복습 대상에서 밀린다."""
+    rec = {"skill_registry": {"a": "A", "b": "B"},
+           "skill_records": {"a": {"state": "State3", "revealed": True}, "b": {"state": "Unconfirmed"}}}
+    assert _weakest_skill_id(rec) == "b"
+    rec["skill_records"]["a"]["state"] = "State2"
+    assert _weakest_skill_id(rec) == "a"            # 아직 확인되지 않은 공개 개념은 그대로 우선
+    print("v3.14 review target ignores confirmed-after-reveal: 2/2 passed")
+
+
+v314_review_target_test()
+
+def v314_registry_phase_new_topic_test():
+    """목록 확인 중에 다른 주제를 말하면 목록 '수정'이 아니라 새 학습 단위로 시작한다."""
+    from unittest.mock import patch
+    global learning_phase, awaiting_registry_confirmation, pending_new_unit
+    old = (dict(learning_context), learning_phase, awaiting_registry_confirmation, pending_new_unit, list(messages))
+    try:
+        learning_context.update({"topic": "상평형도", "goal": "", "concept_id": "phase_diagram"})
+        concept_records.setdefault("phase_diagram", _new_record())
+        learning_phase = "awaiting_registry_confirmation"; awaiting_registry_confirmation = True
+        messages[:] = [{"role": "assistant", "content": "목록이에요"}]
+        with patch("__main__._classify_registry_confirmation", return_value={"decision": "new_topic", "revision_request": "", "reason": ""}), \
+             patch("__main__._handle_learning_start", return_value=True) as start, \
+             patch("__main__._revise_pending_registry") as revise:
+            assert _begin_diagnostic_after_registry_confirmation("활성화에너지 다시 공부하고 싶어") is True
+        start.assert_called_once()
+        assert start.call_args.kwargs.get("force_new") is True
+        revise.assert_not_called()
+        assert messages == [] and awaiting_registry_confirmation is False and pending_new_unit is True
+        assert "phase_diagram" in concept_records                   # 이전 단위 기록은 보존
+        # 같은 주제 안에서 목록을 고치는 요청은 계속 revise로 처리한다
+        learning_phase = "awaiting_registry_confirmation"; awaiting_registry_confirmation = True
+        with patch("__main__._classify_registry_confirmation", return_value={"decision": "revise", "revision_request": "3번 빼 줘", "reason": ""}), \
+             patch("__main__._revise_pending_registry", return_value=True) as revise2:
+            _begin_diagnostic_after_registry_confirmation("3번 빼 줘")
+        revise2.assert_called_once()
+    finally:
+        learning_context.clear(); learning_context.update(old[0])
+        learning_phase, awaiting_registry_confirmation, pending_new_unit = old[1], old[2], old[3]
+        messages[:] = old[4]
+        concept_records.pop("phase_diagram", None)
+    print("v3.14 new topic during registry confirmation: 6/6 passed")
+
+
+v314_registry_phase_new_topic_test()
+
+def v3141_final_fixes_test():
+    # 목표 개념 일치 검사: 개념 이름이 하나도 없으면 다시 만들고, 일반 단어만 겹치는 것은 무시한다
+    assert _off_target("아레니우스식에서 k는 어떻게 달라지나요?", "반응좌표도(reaction coordinate diagram)") is True
+    assert _off_target("반응좌표도의 봉우리는 무엇을 뜻하나요?", "반응좌표도(reaction coordinate diagram)") is False
+    assert _off_target("촉매를 넣으면 달라지는 점은?", "촉매와 활성화에너지") is False
+    assert _off_target("이 개념을 설명해 보세요", "상분율 계산") is True       # '개념' 같은 일반 단어는 일치로 보지 않는다
+    assert _off_target("아무 질문", "") is False                              # 라벨이 없으면 판단하지 않는다
+    # 복습 2턴 이후: 판정 말투와 설명 요구를 하지 않는다
+    rec = {"skill_records": {"s": {"label": "A"}}, "active_skill_id": "s", "review_session": {"extra": True}}
+    ins = _build_action_instruction("review", rec, "continue", {})
+    assert "판정하는 말은 하지 마세요" in ins and "지시문은 쓰지 말고" in ins and "안정적 이해" not in ins
+    # 복습 마무리: 남은 개념 안내 지시
+    assert "remaining_weak_labels" in _build_action_instruction("review_done", rec, "continue", {})
+    print("v3.14.1 target check / review wording / remaining-review notice: 8/8 passed")
+
+
+v3141_final_fixes_test()
+
+PROGRESSION_MODE = _SAVED_PROGRESSION_MODE      # 테스트가 끝나면 설정한 진행 방식으로 되돌린다

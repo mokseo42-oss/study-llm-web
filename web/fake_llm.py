@@ -113,6 +113,8 @@ class _Responses:
         canned = {
             "diagnostic_question": f"{label}에 대해 아는 대로 설명해 볼래요?",
             "guided_question": "좋아요. 그렇게 되는 이유는 무엇이라고 생각해요?",
+            "reasoning_question": f"맞아요. 그럼 {label}이(가) 왜 그렇게 되는지 이유를 말해 볼래요?",
+            "transfer_question": f"좋아요. 이번엔 새로운 상황에 {label}을(를) 적용해 볼게요. 조건이 바뀌면 어떻게 될까요?",
             "hint": "힌트를 하나 드릴게요. 원인과 결과를 나눠서 생각해 보면 어떨까요?",
             "diagnose_misconception": "흥미로운 생각이에요. 그렇다면 조건을 하나 바꿨을 때도 같은 결과가 나올까요?",
             "advance_next": f"잘 설명했어요. 다음 개념으로 넘어갈게요. {label}은(는) 어떤 의미라고 생각해요?",

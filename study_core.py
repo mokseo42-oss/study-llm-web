@@ -1,6 +1,6 @@
-"""STUDY LLM controller core — notebook v3.13 port for the web.
+"""STUDY LLM controller core — notebook v3.14 port for the web.
 
-Generated from STUDY_LLM_modified.ipynb (cells 0-4) by scripts/make_core.py.
+Generated from notebook/STUDY_LLM_v3_14.ipynb (cells 0-4) by scripts/make_core.py.
 Controller logic, prompts and state rules are unchanged; only Colab/IPython I/O was replaced
 and auxiliary rule 2 (cross-unit vulnerability re-check) was added.
 """
@@ -41,16 +41,21 @@ def _trace_event(event):
     """웹 연구자 모드용 추적 이벤트 (기본은 아무 것도 하지 않음). runtime 이 교체한다."""
     return None
 
-APP_VERSION = "3.13"
+APP_VERSION = "3.14"
 MAX_RESPONSE_CHARS = 300      # 규칙 2: 일반 응답 약 300자 이내
 MAX_EXPLAIN_CHARS = 700       # 설명·정답 안내·마무리 요약처럼 사용자가 설명을 받는 턴의 상한
-MAX_HINT_CHARS = 200          # 규칙 6: 힌트·유도 질문은 한 단계만, 짧게
+MAX_HINT_CHARS = 200          # 규칙 6: 힌트는 한 단계만, 짧게
+MAX_STAGE_CHARS = 360         # v3.14: 맞은 답 인정·재정리 + 다음 질문이 한 응답에 들어가는 턴(이유·적용 질문, 개념 이동)
+MAX_QUESTION_CHARS = 280      # v3.14 피드백: 유도 질문은 시작 조건·답변 범위를 담을 수 있게 힌트보다 조금 길게 허용
 MAX_QUESTIONS = 1             # 규칙 2: 한 턴에 학습 질문 1개
 MAX_ASKS_PER_SKILL = 2        # 수정 규칙 2·6: 진단 질문을 제외하고, 같은 개념에서 도움 질문(유도 질문·힌트)은 최대 2번
 MAX_TURNS_PER_SKILL = 3       # 수정 규칙 7: 하위 개념당 대화 최대 3턴
 MAX_WRAPUP_QUESTIONS = 3      # 규칙 10: 마무리 확인 최대 3문제
+PROGRESSION_MODE = "per_skill"  # v3.14: "per_skill" = 개념마다 C(개념)→R(이유)→T(적용)를 마친 뒤 다음 개념 / "concept_first" = 개념(C)만 먼저 한 바퀴 돌고 R·T는 마무리에서 확인(v3.13 방식)
+MAX_HELP_PER_STAGE = 1         # per_skill: 이유·적용 단계에서 힌트는 1번만, 그래도 어려우면 부담 없이 다음으로 넘어간다
+DEFAULT_TERM_STYLE = "bilingual"   # v3.14: "bilingual" = 핵심 용어를 한국어(English)로 함께 표기, "korean" = 한국어만. 학습자가 대화 중에 바꿀 수 있음
 SHOW_CONTROLLER_DEBUG = False  # Set True to show developer diagnostics after each turn
-SAVE_FILE = "study_llm_v3_13_records.json"
+SAVE_FILE = "study_llm_v3_13_records.json"  # 이전 버전 기록을 그대로 불러올 수 있게 파일명은 유지
 
 VALID_STATES = ["Unconfirmed", "State1", "State2", "State3"]
 VALID_STATUS = ["confirmed", "partial", "missing", "unknown"]
@@ -67,22 +72,14 @@ VALID_INTENTS = [
 START_ROUTER_PROMPT = r"""
 You are the learning-start intent router for STUDY LLM. Do not reduce every learner message to a topic name.
 Return JSON only with keys: topic, goal, needs_clarification, clarification_question, intent, direct_request.
-Allowed intent values: "structured_learning", "study_strategy", "direct_explanation", "practice", "other".
-Rules:
-- Extract the specific learning topic from the complete message. Preserve both course and topic when useful, but use the specific topic as topic.
-- Identify what the learner is asking you to DO, not just what subject they mention.
-- If the learner asks how to memorize, remember, retain, or study material more effectively (e.g. "암기법 알려줘", "내용이 안 외워져", "어떻게 외우면 돼?"), set intent="study_strategy". Give a topic-specific study-strategy response before proposing a sub-concept map. Do not silently replace this request with automatic topic decomposition.
-- Only a LITERAL request counts as an explanation request: "설명해줘", "알려줘", "가르쳐줘", "~가 뭐야?". Statements of difficulty or confusion ("이해안돼", "어려워", "모르겠어", "헷갈려") are NOT requests: use intent="structured_learning" and direct_request="". The tutor first checks what the learner knows.
-- If the learner asks for an explanation first, set intent="direct_explanation".
-- If the learner asks to solve or practice problems, set intent="practice".
-- If the learner wants to begin structured learning or gives a general request for help understanding a topic, set intent="structured_learning".
-- If the topic is too broad or missing, set topic="", needs_clarification=true, and ask one concise question.
-- If a specific topic is stated (e.g. enzymes, cell respiration, genetics, molecular orbital theory), preserve it concisely.
-- Preserve the learner's stated goal and requested format. Do not replace a specific request with a generic goal.
-- All learner-facing Korean must use polite Korean honorific speech (해요체).
-- direct_request: copy, in the learner's own words, everything the learner explicitly asked you to DO besides being quizzed (e.g. "explain the principle", "tell me how to memorize it", "make 5 exam questions", "solve this problem"). Use an empty string if there is none. NEVER drop such a request. It is answered before any diagnostic question. Fill direct_request even when you also need a clarification question.
-- If the learner message contains both a request to explain and a request for a study method, set intent="study_strategy" and keep both parts in direct_request.
-- Do not assess knowledge, assign skill IDs, extract C/R/T evidence, or infer a State.
+intent is one of "structured_learning", "study_strategy", "direct_explanation", "practice", "other".
+- topic: the specific learning topic from the whole message (keep course and topic if useful). If it is missing or too broad, topic="", needs_clarification=true, and ask ONE concise question. Keep the learner's stated goal and requested format; do not replace them with a generic goal.
+- Identify what the learner wants you to DO, not only the subject.
+- study_strategy: asks how to memorize, remember or study effectively ("암기법 알려줘", "내용이 안 외워져", "어떻게 외우면 돼?"). Give study-strategy help before any sub-concept map. If the message also asks to explain, keep both parts in direct_request and use study_strategy.
+- direct_explanation / practice: ONLY a LITERAL request ("설명해줘", "알려줘", "가르쳐줘", "~가 뭐야?", or solve/practice problems). Statements of difficulty or confusion ("이해안돼", "어려워", "모르겠어", "헷갈려") are NOT requests: use structured_learning and direct_request="" (the tutor first checks what the learner knows).
+- structured_learning: wants to begin learning or asks generally for help understanding a topic.
+- direct_request: copy, in the learner's own words, everything explicitly asked besides being quizzed (e.g. "explain the principle", "make 5 exam questions"); "" if none. Never drop it: it is answered before any diagnostic question, even when you also need a clarification question.
+- All learner-facing Korean uses polite 해요체. Do not assess knowledge, assign skill IDs, extract evidence, or infer a State.
 """
 
 
@@ -91,132 +88,79 @@ START_CONFIRM_PROMPT = """You are a learning assistant. The learner has confirme
 
 
 EVALUATOR_PROMPT = r"""
-You are the evidence evaluator for STUDY LLM v3.13. Assess ONLY the learner's latest message in the context supplied.
-Do not write a learner-facing answer. Do not choose a final State or learning action. State is computed only by Python. Do not output a State.
-Return only valid JSON with these exact keys:
+You are the evidence evaluator for STUDY LLM v3.14. Assess ONLY the learner's latest message in the supplied CONTEXT.
+Never write a learner-facing answer, a State, or a learning action: Python decides those.
+Return only valid JSON with exactly these keys:
 {
- "topic_detected": "",
- "goal_detected": "",
- "skill_id": "one_exact_id_from_known_skills",
- "skill_label": "exact_label_from_known_skills",
- "task_complete": false,
- "task_completion_note": "",
+ "topic_detected": "", "goal_detected": "",
+ "skill_id": "one_exact_id_from_known_skills", "skill_label": "exact_label_from_known_skills",
+ "task_complete": false, "task_completion_note": "",
  "intent": "continue|explain|practice|skip_check|change_goal|finish_unit|review|next_unit|process_complaint|pause_session|progress_query",
  "has_content_attempt": false,
- "concept": "confirmed|partial|missing|unknown",
- "reasoning": "confirmed|partial|missing|unknown",
- "transfer": "confirmed|partial|missing|unknown",
+ "concept": "confirmed|partial|missing|unknown", "reasoning": "confirmed|partial|missing|unknown", "transfer": "confirmed|partial|missing|unknown",
  "concept_source": "independent_explanation|independent_transfer|hint_assisted|ai_echo|answer_only|unknown",
- "reasoning_source": "independent_explanation|independent_transfer|hint_assisted|ai_echo|answer_only|unknown",
- "transfer_source": "independent_explanation|independent_transfer|hint_assisted|ai_echo|answer_only|unknown",
- "core_misconception": false,
- "misconception_note": "",
- "calculation_or_notation_error_only": false,
- "evidence_note": "",
- "learner_stuck": false,
- "same_strategy_failed": false,
- "key_points_covered": 0,
- "missing_key_point": "",
- "out_of_scope_error": "",
- "answered_asked_question_correctly": false,
- "explicit_explain_request": false
+ "reasoning_source": "(same values)", "transfer_source": "(same values)",
+ "core_misconception": false, "misconception_note": "", "calculation_or_notation_error_only": false,
+ "evidence_note": "", "learner_stuck": false, "same_strategy_failed": false,
+ "key_points_covered": 0, "missing_key_point": "", "out_of_scope_error": "",
+ "answered_asked_question_correctly": false, "explicit_explain_request": false
 }
+Write evidence_note, task_completion_note and misconception_note in KOREAN (한국어), one or two short sentences.
 
-Evaluation rules:
-Intent interpretation:
-- Determine intent from the full learner message and recent dialogue, not from a fixed keyword list.
-- Recognize natural paraphrases, colloquial expressions, indirect requests, and polite/informal Korean.
-- Distinguish continue, explain, practice, skip_check, change_goal, finish_unit, review, and next_unit by what the learner is trying to do in the current context.
-- If the learner asks to explain without solving, choose explain. (The tutor itself adds one short check question after every explanation.)
-- If the learner clearly changes subject or goal, choose change_goal; do not treat it as evidence for the current skill.
-- If intent is genuinely ambiguous, choose continue only when the learner is substantively answering the active task; otherwise choose the closest non-evidential intent and explain uncertainty in evidence_note.
-- A question, self-rating ("I know", "I don't know"), topic/goal statement, or request for an explanation is not a content attempt and is not evidence of understanding or misunderstanding. Set has_content_attempt=false and all three dimensions to unknown for these messages. The JSON schema includes has_content_attempt; always return it.
-- Assess Concept, Reasoning, Transfer separately. A correct answer alone does not confirm reasoning or transfer.
-- SKILL ROUTING IS STRICT: choose exactly ONE skill_id from CONTEXT.known_skills. Copy its exact label. Never invent an ID, rename a skill, merge two registry skills, or assess evidence for multiple skills in one turn. If the message spans multiple skills, assess only the active_task skill; if no active task, choose the single most directly addressed registry skill. If none fits, set skill_id="__UNMAPPED__", has_content_attempt=false, all dimensions="unknown", and state briefly that the message does not map to the current learning unit. Never instruct the learner to call add_skill(). Use active_task.skill_id only as a routing hint, NOT as an override. Re-read active_task.prompt and required_outcome, then select the registry skill that the task actually tests. If the task prompt clearly tests a different skill from active_task.skill_id, select the skill matching the task prompt. If the prompt is ambiguous or spans multiple skills, choose the single most directly assessed skill; if no single skill is defensible, use __UNMAPPED__ and do not record evidence.
-- If an active_task is present, assess whether the learner completed THAT exact task using active_task.prompt and active_task.required_outcome. Set task_complete=true only if the requested task is adequately completed. If the task is partly answered, task_complete=false and identify the missing part. If the learner explicitly asks to stop/skip/change task, do not pretend it was completed.
-- Use ai_echo when the learner merely repeats wording or reasoning just supplied by the AI. Do not count it as independent evidence or as a learner misconception.
-- Use hint_assisted when the answer was produced after a hint or partial solution. It is progress, but not hint-free independent evidence.
-- independent_explanation means the learner independently explains the concept/reasoning in their own words.
-- independent_transfer means the learner independently applies the concept to a genuinely new situation without hints.
-- A numerical answer or formula substitution can support transfer/application only when it solves a genuinely new task. It does NOT establish independent verbal reasoning. Do not label the same calculation as both independent_transfer and independent_explanation unless the learner separately explains why. A routine calculation that repeats a just-taught formula is not automatically transfer.
-- Set has_content_attempt=true only when the learner actually attempts to explain, answer, reason, or apply the target concept in the latest message. A request, self-rating, or statement of confusion is not an attempt.
-- Use missing only when an actual content attempt clearly demonstrates a gap or incorrect understanding in that dimension. Missing does NOT mean no evidence was provided. If no attempt was made or the dimension was not addressed, use unknown.
-- If has_content_attempt=false, core_misconception must be false and misconception_note must be empty.
-- If a dimension was not demonstrated in the latest message, use unknown; do not copy prior status into the latest assessment.
-- Mark core_misconception only for a substantive conceptual error, not arithmetic, units, spelling, or notation slips.
-- If ambiguous, use unknown/partial and explain the uncertainty in evidence_note. Do not mark an entire skill missing because one sub-part is unanswered; evaluate only dimensions actually attempted.
-- `missing` means demonstrated deficiency in a dimension, not merely an unmentioned dimension.
-- If the learner gives a correct result plus a wrong conceptual explanation, preserve the distinction: the result may support transfer, while reasoning may be missing or partial.
-- Detect explicit user choices: asking for direct explanation, practice questions, skipping a check, changing the topic/goal, finishing, reviewing, or moving to the next unit.
-- Never infer that the user wants to skip a check just because they give a short answer.
-- Do not infer a new topic/goal unless the learner states it clearly.
+1. INTENT. Judge from the whole message and recent dialogue, not keywords; accept colloquial or indirect Korean. When unsure, use continue.
+- continue: the learner is answering the active task.
+- explain: ONLY a literal request to be told or taught ("설명해줘", "알려줘", "답이 뭐야?", "~가 뭐야?"); set explicit_explain_request=true.
+- "모르겠어", "잘 모르겠는데", "어려워", "몰라", "이해 안 돼" are a stuck signal, NOT a request: intent=continue, has_content_attempt=false, learner_stuck=true, explicit_explain_request=false.
+- practice (wants problems); change_goal (the learner clearly moves to a DIFFERENT subject than CONTEXT.topic, even when phrased "X에 대해 알고 싶어" or "X 공부하고 싶어": then put that subject in topic_detected; also a clearly new goal); next_unit; review (wants to study a concept more or master it, esp. after the tutor offered a review); progress_query (asks about their own progress or what to review: a question about the record, not a quiz request); skip_check ("다음으로 넘어가자", "이건 아니까 넘겨"; never infer it from a short answer); finish_unit (wrap up and check what is left now).
+- pause_session: tired, discouraged or leaving ("여기까지만 할게", "나중에 다시 할래", "다시 보고 올게", "오늘은 그만"). Not review, not finish_unit.
+- process_complaint: complains about pace or method instead of answering ("정의만 계속 물어볼 거야?", "왜 같은 걸 계속 물어봐", "너무 길어").
+- A question, request, self-rating, topic/goal statement, or empty affirmation/joke ("응", "ㅇㅋ", "당연하지 ㅋㅋ") is NOT a content attempt: has_content_attempt=false, all dimensions unknown.
 
-v3.13 KEY-POINT AND LENIENCY RULES:
-- CONTEXT.active_skill_key_points lists the 2-3 core elements of the active skill. A concept answer is "confirmed" when it carries the core meaning of the key points IN THE LEARNER'S OWN WORDS, even if it is short, informal, or phrased differently from a textbook. For a simple concept, covering 1-2 key points is enough. NEVER mark an answer partial merely because it is short or terse.
-- SCOPE RULE: judge the answer only against what the previous tutor question actually asked. If the question asked the learner to pick or give a few examples ("아는 것 두세 개를 골라"), a correct answer with two or three accurate items covers the concept; do NOT withhold confirmation because other items of the concept were not mentioned. Never require more than the question requested.
-- If the learner states something clearly wrong that was NOT part of what the tutor asked (an extra claim outside the question), do not let it change the judgment of the asked scope, but put a short Korean description of the wrong claim in out_of_scope_error (empty string if none).
-- answered_asked_question_correctly: true only when the learner's answer is correct for exactly what the tutor's previous question asked (a single case, a single rule), regardless of other key points of the skill. A learner who first answers wrongly and then corrects themselves correctly in the next message also counts as true.
-- Count the covered key points in key_points_covered. Put the single most important missing element in missing_key_point (empty string if nothing important is missing). Only one missing element at a time.
-- Reasoning needs a correct cause / why link in the learner's own words. Transfer needs a correct application to a genuinely new situation.
-- Source classification: if the tutor's previous message was a plain open diagnostic question (no answer choices, no blank, no leading cue), the answer is independent_explanation. Use hint_assisted ONLY when the tutor's immediately preceding message actually contained a hint, answer choices, a fill-in blank, or the key term itself. A correct answer must never be downgraded to unknown just because it is short.
-- core_misconception is true ONLY when the learner confidently asserts a wrong belief. A learner who is unsure, thinks aloud, offers several candidates (even if one is right), or asks the tutor a clarifying question has NOT shown a misconception: set core_misconception=false and treat it as a partial/unknown attempt.
-- If the tutor explained or revealed the answer within the last three turns and the learner's answer mostly restates those same points, set the source to ai_echo, not independent.
-- NOT echo (use independent_explanation / independent_transfer): a short correct answer that names or defines a single term the question asked about; and a correct procedure or value applied to a NEW case (different substance, different numbers) even if the procedure itself was mentioned earlier. Echo means the answer repeats the tutor's own wording or the same example, not merely the same correct idea.
-- During wrap-up of a concept whose answer the tutor revealed earlier, a correct application of its key points to a new case also confirms the concept.
-- A reply that only affirms or jokes ("응", "당연하지 ㅋㅋ", "ㅇㅋ") has no content: has_content_attempt=false and all dimensions unknown.
-- If the learner complains about the pace or method of learning (for example "정의만 계속 물어볼 거야?", "왜 같은 걸 계속 물어봐", "너무 길어") instead of answering, choose intent="process_complaint".
-- If the learner says they are tired, discouraged or leaving and wants to stop for now ("여기까지만 할게", "나중에 다시 할래", "너무 어렵다 다시 강의 자료 보고 올게", "오늘은 그만"), choose intent="pause_session". This is NOT review and NOT finish_unit (finish_unit means "wrap up and check what is left now"). A remark like "다시 보고 올게" is a pause, never a request for more questions.
-- After the tutor offered a review or next step, if the learner says they want to study a concept more or master it ("마스터하고 싶어", "더 해볼래", "복습할래"), choose intent="review".
-- If the learner asks about their own progress or what to review ("내 학습 현황이 어때?", "뭘 복습해야 해?", "어디가 부족해?"), choose intent="progress_query". It is a question about the record, not a request to be quizzed.
-- If the learner asks to move on to the next sub-concept ("다음으로 넘어가자", "이건 아니까 넘겨"), choose skip_check.
-- If the learner asks a new question or makes a request (explain, make exam questions, how to memorize), it is not evidence: choose explain or practice and set has_content_attempt=false.
-- "모르겠어", "잘 모르겠는데", "어려워", "몰라" are NOT requests to explain. They are a stuck signal: intent="continue", has_content_attempt=false, learner_stuck=true, explicit_explain_request=false. Choose intent="explain" ONLY when the learner literally asks to be told or taught ("설명해줘", "알려줘", "답이 뭐야?", "~가 뭐야?") and set explicit_explain_request=true. When unsure, intent="continue".
-- Write evidence_note, task_completion_note and misconception_note in KOREAN (한국어), one or two short sentences. Never write them in English.
-- During wrap-up (CONTEXT.wrap_up_target is present) judge the skill wrap_up_target.skill_id and only the dimension(s) named in wrap_up_target.dimension ("concept", or "reasoning_transfer" = both reasoning and transfer). Use that skill_id exactly.
+2. SKILL ROUTING. Choose exactly ONE skill_id from CONTEXT.known_skills and copy its exact label; never invent, rename or merge skills. If the message spans several, assess only the active one; with no active task, the single most directly addressed one. active_task.skill_id is only a hint: re-read active_task.prompt and required_outcome and pick the skill the task actually tests. If none fits, use skill_id="__UNMAPPED__", has_content_attempt=false, dimensions unknown, and say briefly that it does not map to the current unit. Never tell the learner to call add_skill(). During an active practice_session keep its target skill as the practice goal: prerequisite checks are internal steps. With active_task, set task_complete=true only if THAT task is adequately completed; if partly answered, false and name the missing part. During wrap-up (CONTEXT.wrap_up_target present) judge only wrap_up_target.skill_id and the dimension(s) named in wrap_up_target.dimension ("reasoning_transfer" = reasoning and transfer).
+
+3. DIMENSIONS. Assess concept, reasoning, transfer separately; a correct answer alone does not confirm reasoning or transfer.
+- Concept is "confirmed" when the learner's own words carry the core meaning of CONTEXT.active_skill_key_points, even if short or informal; for a simple concept 1-2 key points are enough. Never mark partial merely for being short.
+- SCOPE: judge only what the previous tutor question asked. If it asked for a few examples, two or three accurate ones cover the concept. Never require more than was asked.
+- LENIENT for reasoning and transfer: a plausible, mostly correct answer in the learner's own words counts as "confirmed" even if short, informal or not fully precise. Use "partial" only when an essential step is clearly missing, and "missing" only for a wrong claim. Do not demand textbook wording or extra detail beyond what the tutor asked.
+- If CONTEXT.active_stage is "R", the tutor's last question asked for REASONING; if "T", for TRANSFER. Judge that dimension first (and set answered_asked_question_correctly accordingly); concept may also be marked when it is clearly shown.
+- Reasoning needs a correct cause/why link in the learner's words. Transfer needs a correct application to a genuinely new situation. A numerical answer can support transfer only for a genuinely new task and does not establish verbal reasoning. Correct result + wrong explanation: transfer may be supported while reasoning is missing/partial.
+- "missing" = an actual attempt shows a gap or error in that dimension. Unaddressed = unknown. Do not copy earlier status. If ambiguous use unknown/partial and explain in evidence_note.
+- key_points_covered = number of key points covered; missing_key_point = the single most important missing element ("" if none).
+- answered_asked_question_correctly = true only when the answer is correct for exactly what the tutor's last question asked (a self-correction in the same message counts).
+- A clearly wrong claim outside what was asked does not change the asked-scope judgment: describe it briefly in out_of_scope_error ("" if none).
+
+4. SOURCES.
+- independent_explanation / independent_transfer: own words / new situation, no hint.
+- If the tutor's previous message was a plain open question (no choices, blank, leading cue, or key term), a correct answer is independent_explanation, however short. hint_assisted ONLY if the preceding tutor message really contained a hint, answer choices, a blank, or part of the ANSWER itself, or if the AI supplied the analogy or mapping and the learner did not extend it beyond that. Naming the concept being asked about ("~에 대해 아는 대로 설명해 볼래요?", "~는 어떤 역할을 한다고 생각해요?") is NOT a cue: an answer to such a question is independent_explanation.
+- A task statement that only gives a new situation, values and the question is not a hint; one that includes a leading formula, partial solution, worked example or cue to the key step is.
+- ai_echo: the tutor explained or revealed the answer within the last three turns and the learner mostly restates the same points, wording or example. Not independent, not a misconception. NOT echo: a short correct answer naming or defining the single term asked about, or a correct procedure/value applied to a NEW case (different substance or numbers).
+- During wrap-up of a concept whose answer was revealed earlier, a correct application of its key points to a new case confirms the concept.
+- Never downgrade a correct answer to unknown merely because it is short.
+
+5. MISCONCEPTION. core_misconception=true ONLY when the learner confidently asserts a substantive wrong belief. Not for arithmetic, units, spelling or notation slips (set calculation_or_notation_error_only), nor when the learner is unsure, thinking aloud, offering several candidates, or asking a clarifying question. If has_content_attempt=false, core_misconception=false and misconception_note="".
 """
 
 RESPONSE_PROMPT = r"""
-You are STUDY LLM v3.13, a learning dialogue assistant. Follow the controller instruction exactly.
-Write in Korean unless the learner requests another language.
-KOREAN TONE RULE: Use consistent polite Korean honorific speech (해요체) in EVERY learner-facing response. Never mix 반말 and 존댓말 within a response or across turns. Prefer natural forms such as "좋아요", "설명해 볼까요?", "말씀해 주세요", "확인해 볼게요". Never use formal endings such as "~습니다", "~입니다", "~겠습니다".
-If the learner asks a clarifying question about the tutor's own question (e.g. "이거 말하는 거야?"), restate in one sentence what is being asked, without confirming which candidate is correct, and ask again. Avoid informal endings such as "좋아", "해봐", "말해줘", "할게", "있어". Keep scientific terms and equations unchanged.
-Use concise, natural language, generally within 300 Korean characters. Explanation turns (full_explanation, reveal_and_next, wrap_up_summary) may use up to 600 Korean characters.
-If the context has out_of_scope_error, add one short clause saying that part may not hold in general and suggesting the learner check it in the course material. Do not teach the correct answer and do not praise that part.
-Ask at most ONE learner-facing learning question. Do not ask redundant questions.
-Respect the learner's explicit goal and chosen method.
-For practice, give exactly ONE atomic task/question per response. If a larger exercise has parts, split them across turns. Do not complete the learner's explanation. Identify at most one missing link and invite the learner to supply it. A question expressing uncertainty is not automatically a request for a full explanation.
-When giving a hint, give only one step. Do not jump to a full solution unless the user explicitly asks. During diagnosis, do not reveal the correct definition, formula, relationship, or answer before the learner has attempted the diagnostic question. A diagnostic question must test the learner’s current understanding, not teach the answer inside the question.
-After an explanation, check understanding with one meaningful question or short application, not "이해했어?".
-Do not repeat an already confirmed check without a reason. If an active task is incomplete, continue that task instead of offering a review/next-unit menu. A task is complete only when its required answer and reasoning are supplied or the learner explicitly skips/stops it.
-When a specific sub-concept reaches State3, describe only THAT sub-concept as well-supported. Do not claim the entire topic is mastered if other sub-concepts are Unconfirmed, State1, or State2. Offer a next choice only after the current task is complete or explicitly stopped. A learner's answer is not itself a menu choice.
-Do not claim that the learner has mastered an entire subject. Refer only to the current concept.
-- Do not present more than one atomic learner task/question in a single response. Split multi-part exercises across turns.
-- If an active task is incomplete, continue that exact task; do not offer review/next-topic choices.
-- Do not ask the learner to choose a next action unless the controller action is `offer_learner_choice`, `offer_direction_choice` or `wrap_up_summary`.
-- Do not state that all C/R/T are confirmed from one correct numerical answer.
-- Progress summaries must show each sub-concept's own State. Do not calculate, infer, or display one overall/topic-level State. Never use the status of other skills to judge the active skill.
+You are STUDY LLM v3.14, a Korean study tutor. Do exactly what context.action_instruction says this turn, nothing more.
 
+TONE: polite Korean 해요체 (존댓말) in every turn. Never 반말, and never "~습니다/~입니다/~겠습니다". Examples: "좋아요", "설명해 볼까요?", "확인해 볼게요". Keep scientific terms and equations unchanged. Use another language only if the learner asks. If context.learner_preferences.term_style is "bilingual", write key terms as 한국어(English), e.g. 상경계(phase boundary), and keep the same pairs in every later turn; within one reply, give the English only at a term's first mention.
 
-STRICT EVIDENCE RULES FOR v3.9:
-- The skill_id must exactly match one key in known_skills. The Python controller rejects any unknown ID.
-- `confirmed` requires positive evidence in the latest learner message. Never use confirmed merely because a previous turn confirmed it.
-- Use `partial` when the learner demonstrates a correct but incomplete idea. Use `missing` only when an actual attempted explanation demonstrates a specific gap. Use `unknown` when not addressed.
-- Source classification must reflect assistance history in recent_dialogue and active_task. Repeating an AI explanation, following an explicit hint, or answering a guided analogy is not hint-free independent transfer. A task statement that supplies only a new situation, values, and the question (without supplying the governing formula, answer, or solution step) is NOT by itself a hint; a correct self-generated application may count as independent_transfer. If the task statement includes a leading formula, partial solution, worked example, or a cue that gives away the key conceptual step, classify the corresponding evidence as hint_assisted.
-- For an analogy supplied by the AI, mark the analogous concept as `hint_assisted` unless the learner independently extends it to a genuinely new situation beyond the supplied mapping.
-- Do not call a transfer answer independent_transfer merely because it is in a different domain if the AI supplied the analogy or the exact mapping. A newly generated numerical scenario can be a valid transfer task when it requires the learner to select and apply the principle without a solution cue.
-- Keep the evidence dimension-specific. A correct concept statement does not confirm reasoning; a correct analogy does not automatically confirm electrical transfer.
+LENGTH: about 300 Korean characters (up to about 350 when you acknowledge or recap the learner's answer and then ask); explanation turns (full_explanation, reveal_and_next, wrap_up_summary) up to 600. At most ONE learner-facing question and one atomic task per response; split multi-part exercises across turns. Offer the learner a choice of next step only for offer_learner_choice, offer_direction_choice or wrap_up_summary.
 
-v3.13 DIALOGUE RULES:
-- Never ask a question that contains its own answer: no multiple choice, no fill-in-the-blank, no sentence starter to complete, no key terms from the answer, no yes/no question whose answer is obvious. A diagnostic question is open-ended and neutral.
-- Never repeat the previous tutor question or merely reword it. When a second ask is needed, make it a smaller, different step (a hint) instead of the same question.
-- If the learner's answer already contains the core meaning, accept it plainly in one short sentence and move on. Do not ask for the same thing again or demand more length.
-- Never mention internal terms: State, Controller, Evidence, C/R/T, skill ID, registry, 증거, 판정. Talk naturally about the "개념".
-- Do not output progress tables, logs, or English sentences (scientific terms may stay).
-- reveal_and_next: give the short answer in 1-3 sentences using key_points, say naturally that the concept will be checked again at the end, then ask exactly ONE open diagnostic question about the next concept (if next_skill is present). Never ask the revealed concept again.
-- advance_next: acknowledge the answer in one short sentence without teaching more, then ask exactly ONE open diagnostic question about the next concept.
-- When controller context has explanation_strategy, explain with that strategy (definition | example | analogy | step_breakdown) and do not reuse a strategy from earlier turns.
-- When transition.how is "revealed" and the action is a wrap_up action, first give the short answer for transition.closed_label in 1-2 sentences, then continue with the wrap-up instruction.
+QUESTIONS:
+- Open and neutral: no answer choices, fill-in-the-blank, sentence starter, key term or answer inside the question, no obvious yes/no.
+- Specific enough to read only one way: give the starting situation and conditions (which substance, which change, which condition) and what kind of answer is expected. If a scenario could mean several things, add the missing condition or say what to answer about, without hinting at the answer.
+- Never repeat or merely reword the previous tutor question; a second ask is a smaller, different step.
+- After an explanation, check understanding with one meaningful question or short application, never "이해했어?".
+
+HELP: Do not complete the learner's explanation; point to at most one missing link. A hint is one step; no full solution unless asked. Before the learner has tried, never reveal the definition, formula or answer. A question that expresses uncertainty is not a request for a full explanation. If the answer already carries the core meaning, accept it plainly and move on. If a task is still open, continue that exact task. When context has explanation_strategy, explain with that strategy (definition | example | analogy | step_breakdown).
+
+CLAIMS: Talk only about the current concept's own progress; never say the whole topic is mastered, never give one overall level, never say everything is confirmed from one correct answer.
+If the context has out_of_scope_error, add one short clause saying that part may not hold in general and suggesting the course material; do not teach or praise it.
+If the learner asks what the tutor's own question means, restate it in one sentence without confirming any candidate answer, then ask again.
+Never mention internal terms (State, Controller, Evidence, C/R/T, skill ID, registry, 증거, 판정); say "개념". No tables, logs or English sentences.
 """
+
 
 
 # ---------------------------
@@ -231,6 +175,8 @@ learning_phase = "idle"
 awaiting_registry_confirmation = False
 pending_new_unit = False  # True while collecting a new topic after an explicit subject switch
 pending_study_strategy = None  # topic/request while offering study-strategy guidance
+# v3.14: 학습자가 정한 용어 표기 선호 (예: "영어로도 같이 표기해 줘"). 한 번 정하면 이후 모든 응답에 유지한다.
+learner_prefs = {"term_style": DEFAULT_TERM_STYLE}   # korean | bilingual
 pending_start_requests = []    # 주제 확인 중 받은 사용자 요청(설명·암기법·문제 출제 등)을 버리지 않고 모아 둠
 
 HELP_ACTIONS = {"hint", "partial_explanation", "prerequisite_explanation", "full_explanation", "reveal_and_next"}
@@ -299,7 +245,11 @@ def _new_skill_record(label, key_points=None):
         "closed": None,        # None | "confirmed" | "revealed" | "skipped"
         "revealed": False,     # 답을 알려주고 넘어간 개념: 마무리 확인 맨 앞
         "needs_recheck": False,
-        "strategies_used": []
+        "strategies_used": [],
+        "stage": "C",          # v3.14 per_skill 모드의 현재 단계: "C" 개념 → "R" 이유 → "T" 적용 → "done"
+        "stage_hints": 0,      # 현재 단계에서 준 힌트 수 (MAX_HELP_PER_STAGE)
+        "stage_misc": 0,       # 현재 단계에서 오개념 확인 질문을 한 횟수
+        "deepen_incomplete": False  # 이유·적용을 끝까지 확인하지 못하고 넘어간 개념
     }
 
 
@@ -308,7 +258,8 @@ def _ensure_skill_fields(skill):
     for k, v in (("key_points", []), ("ask_count", 0), ("turns_spent", 0), ("closed", None),
                  ("revealed", False), ("needs_recheck", False), ("strategies_used", []),
                  ("misconceptions", []), ("evidence", []), ("help_level", 0),
-                 ("same_strategy_stuck_count", 0), ("rechecked", False)):
+                 ("same_strategy_stuck_count", 0), ("rechecked", False),
+                 ("stage", "C"), ("stage_hints", 0), ("stage_misc", 0), ("deepen_incomplete", False)):
         if k not in skill:
             skill[k] = list(v) if isinstance(v, list) else v
     return skill
@@ -399,8 +350,10 @@ def initialize_skill_registry(record=None):
     learner_request = " / ".join(pending_start_requests) if pending_start_requests else learning_context.get("goal", "")
     if not topic:
         return {}
+    label_rule = ('LABEL LANGUAGE: the learner wants Korean and English terms together, so write each label as "한국어(English term)", e.g. "상경계(phase boundary)".\n'
+                  if learner_prefs.get("term_style") == "bilingual" else "")
     prompt = f"""Create a concise learning map for this topic.
-Topic: {topic}
+{label_rule}Topic: {topic}
 Goal: {goal}
 Learner request: {learner_request}
 Return JSON only: {{"skills":[{{"id":"short_snake_case_id","label":"Korean learner-facing label","key_points":["핵심 요소 1","핵심 요소 2"]}}]}}.
@@ -843,6 +796,8 @@ def _build_wrap_up_queue(record):
         elif vulnerable:
             pri, dim, why = 4, "reasoning_transfer", "vulnerable"
         else:
+            if PROGRESSION_MODE == "per_skill":
+                continue        # 이유·적용은 개념마다 이미 물었으므로 마무리에서 다시 묻지 않는다 (요약에서 안내만)
             pri, dim, why = 5, "reasoning_transfer", "unconfirmed"
         items.append((pri, idx, {"skill_id": sid, "label": sk.get("label", label),
                                  "dimension": dim, "reason": why}))
@@ -896,12 +851,72 @@ def _after_skill_closed(record, closed_sid, how, kind):
     return _wrap_up_next_action(record)
 
 
+# ---------------------------
+# v3.14 per_skill 모드: 개념마다 C(개념) → R(이유) → T(적용)
+# ---------------------------
+STAGE_DIM = {"R": "reasoning", "T": "transfer"}
+STAGE_ACTION = {"R": "reasoning_question", "T": "transfer_question"}
+
+
+def _set_stage(record, sid, skill, stage, from_stage):
+    skill["stage"] = stage
+    skill["stage_hints"] = 0
+    skill["stage_misc"] = 0
+    record["active_skill_id"] = sid
+    record["transition"] = {"how": "stage", "from_stage": from_stage, "stage_to": stage, "sid": sid,
+                            "label": skill.get("label", sid)}
+    return STAGE_ACTION[stage]
+
+
+def _next_stage_after(skill, current):
+    """다음으로 확인할 단계. 이미 독립적으로 확인된 차원은 건너뛴다."""
+    order = ["C", "R", "T"]
+    for st in order[order.index(current) + 1:]:
+        if skill.get("dimensions", {}).get(STAGE_DIM[st]) != "confirmed":
+            return st
+    return None
+
+
+def _advance_stage(record, sid, skill, current):
+    nxt = _next_stage_after(skill, current)
+    if nxt:
+        return _set_stage(record, sid, skill, nxt, current)
+    skill["stage"] = "done"
+    return _after_skill_closed(record, sid, "confirmed", "advance_next")
+
+
+def _deepen_step(record, sid, skill, assessment, misconception):
+    """이유(R)·적용(T) 단계의 다음 행동. 어느 정도 맞으면 인정하고 진행, 막히면 힌트 1번 뒤 부담 없이 넘어간다."""
+    stage = skill.get("stage", "R")
+    dim = STAGE_DIM[stage]
+    src = assessment.get(dim + "_source", "unknown")
+    attempted = bool(assessment.get("has_content_attempt"))
+    good = (attempted and not misconception and src not in ("ai_echo", "answer_only")
+            and (assessment.get(dim) in ("confirmed", "partial") or assessment.get("answered_asked_question_correctly") is True))
+    if good or skill.get("dimensions", {}).get(dim) == "confirmed":
+        return _advance_stage(record, sid, skill, stage)
+    if misconception and record.get("last_action") != "diagnose_misconception" and skill.get("stage_misc", 0) < 1:
+        skill["stage_misc"] = skill.get("stage_misc", 0) + 1
+        return "diagnose_misconception"
+    if skill.get("stage_hints", 0) < MAX_HELP_PER_STAGE:
+        skill["stage_hints"] = skill.get("stage_hints", 0) + 1
+        skill["help_level"] = 1
+        return "hint"
+    # 힌트를 받고도 어려우면 더 몰아붙이지 않고 넘어간다 (피드백: 과도한 자기설명 요구 방지)
+    skill["stage"] = "done"
+    skill["deepen_incomplete"] = True
+    act = _after_skill_closed(record, sid, "confirmed", "advance_next")
+    record["transition"]["how"] = "moved_on"
+    return act
+
+
 def _weakest_skill_id(record):
     rank = {"Unconfirmed": 0, "State1": 1, "State2": 2, "State3": 3}
     cands = []
     for idx, (sid, sk) in enumerate(record.get("skill_records", {}).items()):
         if sid in record.get("skill_registry", {}):
-            cands.append((1 if sk.get("unvisited") else 0, 0 if sk.get("revealed") else 1,
+            cands.append((1 if sk.get("unvisited") else 0, 0 if (sk.get("revealed") and sk.get("state") != "State3") else 1,   # 공개 뒤 독립 증거로 State3이 된 개념은 더 이상 우선하지 않는다
+
                           rank.get(sk.get("state", "Unconfirmed"), 0), idx, sid))
     return sorted(cands)[0][4] if cands else None
 
@@ -1020,9 +1035,13 @@ def choose_action(record, intent, assessment):
     skill = _ensure_skill_fields(record["skill_records"][sid])
     skill["turns_spent"] += 1
     misconception = bool(assessment.get("core_misconception")) and not assessment.get("calculation_or_notation_error_only")
+    if PROGRESSION_MODE == "per_skill" and skill.get("stage", "C") in ("R", "T"):
+        return _deepen_step(record, sid, skill, assessment, misconception)
     concept_ok = (skill.get("state") in ("State2", "State3")
                   and skill.get("dimensions", {}).get("concept") == "confirmed")
     if concept_ok and not misconception:
+        if PROGRESSION_MODE == "per_skill":
+            return _advance_stage(record, sid, skill, "C")      # 개념이 확인되면 이유 → 적용 순서로 이어 간다
         return _after_skill_closed(record, sid, "confirmed", "advance_next")
     if (assessment.get("concept") == "confirmed" and not misconception
             and assessment.get("concept_source") == "hint_assisted"):
@@ -1081,6 +1100,42 @@ def progress_summary(record):
 # ---------------------------
 # LLM calls and user-facing dialogue
 # ---------------------------
+# ---------------------------
+# v3.14: 학습자 선호(용어 표기) 감지
+# ---------------------------
+def _detect_term_style(text):
+    """'영어로도 같이 표기해 줘' 같은 용어 표기 요청을 감지한다. 설명 언어 전체를 바꾸는 요청('영어로 설명해 줘')은 해당하지 않는다."""
+    t = str(text)
+    if re.search(r"한국어\s*(로)?\s*만|영어\s*(는|은)?\s*(빼|필요\s*없|말고)|영어\s*병기\s*(는|은)?\s*(그만|빼)", t):
+        return "korean"
+    mentions_en = re.search(r"영어|영문|english|한영", t, re.I)
+    wants_pair = re.search(r"같이|함께|병기|표기|괄호|도\s*(써|적|알려|보여|붙|표시)", t)
+    switches_language = re.search(r"영어로\s*(만|설명|말|대화|질문|답)|in english only", t, re.I)
+    if mentions_en and wants_pair and not switches_language:
+        return "bilingual"
+    return None
+
+
+def _update_learner_prefs(text):
+    """선호가 바뀌었을 때만 한 줄로 알리고 저장한다. 이후 모든 LLM 호출에 반영된다."""
+    style = _detect_term_style(text)
+    if style and style != learner_prefs.get("term_style"):
+        learner_prefs["term_style"] = style
+        if style == "bilingual":
+            print("앞으로 핵심 용어는 한국어(English)로 함께 표기할게요.")
+        else:
+            print("앞으로 용어는 한국어로만 표기할게요.")
+        return True
+    return False
+
+
+def _pref_instruction():
+    """LLM 호출 지시문 뒤에 붙일 선호 문장 (기본값이면 빈 문자열)."""
+    if learner_prefs.get("term_style") == "bilingual":
+        return "\nTERM STYLE: write every key scientific term as 한국어(English), e.g. 상경계(phase boundary), and keep the same pair every time. Within one reply, add the English only at a term's FIRST mention; repeat it in Korean alone afterwards."
+    return ""
+
+
 def _call_evaluator(user_text, record, turn_id):
     recs = record.get("skill_records", {})
     active_sid = record.get("active_skill_id") or ""
@@ -1092,6 +1147,7 @@ def _call_evaluator(user_text, record, turn_id):
         "active_skill_dimensions": active_sk.get("dimensions", {"concept":"unknown", "reasoning":"unknown", "transfer":"unknown"}),
         "active_skill_key_points": active_sk.get("key_points", []),
         "ask_count_for_active_skill": active_sk.get("ask_count", 0),
+        "active_stage": active_sk.get("stage", "C") if PROGRESSION_MODE == "per_skill" else "C",
         "recent_misconceptions": record["misconceptions"][-3:],
         "recent_evidence_by_skill": {sid: sk.get("evidence", [])[-6:] for sid, sk in recs.items()},
         "recent_dialogue": messages[-8:],
@@ -1100,12 +1156,7 @@ def _call_evaluator(user_text, record, turn_id):
         "help_level": active_sk.get("help_level", record["help_level"]),
         "active_task": record.get("active_task"),
         "practice_session": record.get("practice_session"),
-        "practice_session_rule": "If active, preserve target_skill_id as the learner's chosen practice goal. Prerequisite checks are substeps inside that practice session; after confirming one prerequisite, return to the next step of the original practice goal.",
-        "active_task_routing_rule": "For ordinary diagnosis, route by the concept tested. During an active practice_session, preserve its target goal and treat prerequisite checks as internal practice steps, not a change of learning target.",
         "wrap_up_target": record.get("wrap_target") if record.get("wrap_up_active") else None,
-        "known_skill_ids": list(record.get("skill_registry", {}).keys()),
-        "skill_registry_locked": record.get("registry_locked", False),
-        "skill_registry": record.get("skill_registry", {}),
         "known_skills": {sid: {"label": recs.get(sid, {}).get("label", label),
             "state": recs.get(sid, {}).get("state", "Unconfirmed"),
             "dimensions": recs.get(sid, {}).get("dimensions", {}),
@@ -1129,6 +1180,7 @@ def _call_evaluator(user_text, record, turn_id):
 
 
 def _build_action_instruction(action, record, intent, assessment):
+    """컨트롤러가 정한 행동을 응답 LLM에게 알리는 짧은 지시문. (규칙의 근거는 ACTION_RULES 참고)"""
     recs = record.get("skill_records", {})
     cur = recs.get(record.get("active_skill_id") or "", {})
     label = cur.get("label", "현재 개념")
@@ -1137,90 +1189,125 @@ def _build_action_instruction(action, record, intent, assessment):
     wt = record.get("wrap_target") or {}
     strategy = record.get("current_strategy") or "definition"
 
-    QRULE = (" 질문 규칙: 한 문장에 한 가지만 묻고, 범위가 넓은 개념이면 '각각/모두'를 묻지 말고 '아는 것 두세 개를 골라 설명'하게 하세요. "
-             "개념 이름은 써도 되지만, 답에 해당하는 구체적 용어나 값(예: 구조 이름, 수치)은 질문에 넣지 마세요. 개념 이름을 '원자 하나의 상태' 같은 돌려 말하기로 바꾸지 마세요.")
+    # 모든 질문에 공통으로 붙는 규칙 (규칙 3·5·7 + v3.14 질문 구체성)
+    QRULE = (" 질문 규칙: 한 문장에 한 가지만 묻고, 질문에 쓴 말이 한 가지 뜻으로만 읽히게 하세요. "
+             "개념 이름은 써도 되지만 정답에 해당하는 용어나 값은 넣지 말고, 개념 이름을 돌려 말하지 마세요. "
+             "상황을 가정하는 질문이면 처음 상태와 조건(어떤 물질인지, 어떤 변화인지, 무엇이 일정한지)과 답해야 할 것(예: '어떤 상변화가 일어나는지')을 적어 한 가지 뜻으로만 읽히게 하세요. "
+             "여러 방향으로 읽힐 수 있으면 조건이나 답변 기준을 덧붙이되 정답은 넣지 마세요.")
+    WIDE = " 범위가 넓으면 '아는 것 두세 개를 골라 설명'하게 하세요."
+    OPEN_Q = "쉬운 말로 직접 묻는 열린 질문 하나만 하세요(예: '~에 대해 아는 대로 설명해 볼래요?'). 선택지, 빈칸, 핵심어, 돌려 말하기는 쓰지 마세요."
+
     reveal_first = ""
     if tr.get("how") == "revealed" and action in ("wrap_up_check", "wrap_up_summary"):
-        reveal_first = (f"먼저 '{tr.get('closed_label')}'의 핵심 답을 reveal_key_points를 바탕으로 1~2문장으로 알려 주고, "
-                        "마무리 확인에서 다시 확인하겠다고 자연스럽게 알려 주세요. 그다음 아래 지시를 수행하세요. ")
+        reveal_first = (f"먼저 '{tr.get('closed_label')}'의 핵심 답을 reveal_key_points로 1~2문장 알려 주고, 마무리 확인에서 다시 확인한다고 알리세요. 그다음 아래 지시를 따르세요. ")
     to_wrap = ""
     if tr.get("to_wrap_up") and tr.get("how") != "revealed" and action in ("wrap_up_check", "wrap_up_summary"):
-        to_wrap = (f"먼저 방금 학습자의 답('{tr.get('closed_label', '')}')에서 맞은 부분을 한 문장으로 인정하세요(새 설명은 덧붙이지 마세요). "
-                   "그다음 정해진 하위 개념을 모두 다뤘다고 짧게 알리고, 이어서 아래 지시를 수행하세요. ")
         if tr.get("how") == "skipped":
-            to_wrap = ("건너뛰자는 요청을 받아들였다고 먼저 짧게 알리고(확인하지 않은 부분은 마무리에서 다시 본다고), "
-                       "정해진 하위 개념을 모두 다뤘다고 한 문장으로 알린 뒤 아래 지시를 수행하세요. ")
+            to_wrap = "건너뛰자는 요청을 받아들였고 확인하지 않은 부분은 마무리에서 다시 본다고 짧게 알린 뒤, 정해진 하위 개념을 모두 다뤘다고 한 문장으로 알리고 아래 지시를 따르세요. "
+        else:
+            to_wrap = (f"먼저 방금 답('{tr.get('closed_label', '')}')에서 맞은 부분을 인정하고, 학습자가 말한 핵심만 한 문장으로 다시 정리하세요(말하지 않은 새 내용은 덧붙이지 마세요). "
+                       "그다음 정해진 하위 개념을 모두 다뤘다고 짧게 알리고 아래 지시를 따르세요. ")
 
+    wrap_instruction = ""
     if action == "wrap_up_check":
         _has_prior = bool(recs.get(wt.get("skill_id"), {}).get("evidence"))
         if wt.get("dimension") == "concept" and (wt.get("reason") == "revealed" or (wt.get("reason") in ("hint_assisted", "unconfirmed") and _has_prior)):
-            wrap_q = (f"'{wt.get('label')}'은 이미 대화에서 다룬 개념입니다. 같은 질문을 되풀이하거나 설명을 다시 시키지 말고, recent_dialogue에 이미 나온 사례와 겹치지 않는 구체적인 새 사례 하나에 이 개념을 적용해 보게 하는 질문 하나만 하세요. "
-                      "대화에서 비유나 예시로 쓴 물질·소재(예: 소금물, 설탕물)는 다시 쓰지 말고 다른 물질이나 수치를 쓰세요. 단위 변환·절차를 확인하는 질문이라면 변환 결과의 단위나 방법(예: 'L로', '몰질량으로 나눠')을 질문에 적지 말고 '이 값을 계산에 쓰려면 어떻게 다루나요?'처럼 물으세요. 용질·용매처럼 정답에 해당하는 말은 질문에 넣지 마세요. 정답이나 핵심어를 제시하지 마세요.")
+            wrap_q = (f"'{wt.get('label')}'은 이미 대화에서 다룬 개념이므로 같은 질문을 되풀이하거나 다시 설명하게 하지 마세요. recent_dialogue에 나온 사례와 겹치지 않는 구체적인 새 사례 하나에 이 개념을 적용해 보게 하는 질문 하나만 하세요. "
+                      "대화에서 이미 쓴 물질·소재는 다시 쓰지 말고, 단위 변환·절차를 묻는 경우에도 변환 결과나 방법을 질문에 적지 마세요('이 값을 계산에 쓰려면 어떻게 다루나요?'처럼). 정답에 해당하는 말(예: 용질·용매)은 넣지 마세요.")
         elif wt.get("dimension") == "concept":
-            wrap_q = (f"'{wt.get('label')}'의 핵심을 학습자가 자기 말로 설명하게 하는 열린 질문 하나만 하세요. "
-                      "정답, 핵심어, 선택지, 빈칸을 제시하지 마세요. 범위가 넓으면 아는 것 두세 개를 골라 설명하게 하세요. 최근 대화에서 이미 한 질문과 같은 내용이 되지 않도록 이 개념만의 초점을 물으세요.")
+            wrap_q = (f"'{wt.get('label')}'의 핵심을 학습자가 자기 말로 설명하게 하는 열린 질문 하나만 하세요. 정답, 핵심어, 선택지, 빈칸은 쓰지 마세요. "
+                      "범위가 넓으면 아는 것 두세 개를 고르게 하고, 최근 질문과 겹치지 않게 이 개념만의 초점을 물으세요.")
         else:
             extra = " 이전에 흔들렸던 개념이므로 앞서 쓴 예와 다른 상황을 쓰세요." if wt.get("reason") == "vulnerable" else ""
             if wt.get("reason") == "revealed_recent":
-                extra = " 방금 알려 준 내용을 되풀이하게 하지 말고, 앞서 쓰지 않은 새 상황에 적용하게 하세요."
-            wrap_q = (f"'{wt.get('label')}'을(를) 힌트 없이 새로운 상황에 적용하고, 그렇게 되는 이유를 자기 말로 한 문장 덧붙이게 하는 질문 하나만 하세요."
-                      " 풀이 단서나 정답을 주지 마세요." + extra)
+                extra = " 방금 알려 준 내용을 되풀이하게 하지 말고 앞서 쓰지 않은 새 상황에 적용하게 하세요."
+            wrap_q = f"'{wt.get('label')}'을(를) 힌트 없이 새로운 상황에 적용하고 그 이유를 자기 말로 한 문장 덧붙이게 하는 질문 하나만 하세요. 풀이 단서나 정답은 주지 마세요." + extra
         prev = ""
         if record.get("wrap_up_questions_asked", 0) > 0 and not to_wrap and not reveal_first:
-            prev = ("먼저 직전 답에 한 문장으로 반응하세요: 맞은 부분은 구체적으로 인정하고, 빠진 부분이 있으면 정답을 말하지 말고 '마지막 정리에서 다시 짚을게요'라고만 하세요. "
+            prev = ("먼저 직전 답에 한 문장으로 반응하세요: 맞은 부분은 구체적으로 인정하고, 빠진 부분은 정답을 말하지 말고 '마지막 정리에서 다시 짚을게요'라고만 하세요. "
                     "'모르겠다'는 답이면 '괜찮아요'로 짧게 받으세요. ")
-        wrap_instruction = prev + "마무리 확인 단계입니다. 이미 확인된 내용은 다시 묻지 말고, " + wrap_q + QRULE
+        wrap_instruction = prev + "마무리 확인 단계입니다. 이미 확인된 내용은 다시 묻지 마세요. " + wrap_q + QRULE
+
+    review_extra = bool((record.get("review_session") or {}).get("extra"))
+    if review_extra:
+        review_ins = (f"학습자의 직전 복습 답에서 맞은 부분을 한 문장으로 인정하세요(이해 수준이나 상태를 판정하는 말은 하지 마세요). "
+                      f"그다음 '{label}'을(를) 이전 복습·대화와 다른 작은 새 상황에 적용해 보는 가벼운 질문 하나만 하세요. 이유를 설명하라는 요구나 '~해 주세요' 같은 지시문은 쓰지 말고 질문으로 끝내며, 정답이나 풀이 단서는 주지 마세요.")
     else:
-        wrap_instruction = ""
+        review_ins = (f"복습은 부족한 개념을 보완하는 것이 목적이므로 다시 평가받는 느낌이 들지 않게, 먼저 '{label}'의 핵심을 explain_key_points로 1~2문장 쉽게 정리하세요(예시 하나 가능). "
+                      "그다음 정리한 내용으로 풀 수 있는 쉬운 확인 질문 하나만 하세요. 정리한 문장을 그대로 따라 말하게 하지 말고 작은 새 상황에 적용하는 가벼운 질문으로 하며, '다시 설명해 보세요' 같은 요구는 하지 마세요.")
+
+    if tr.get("how") == "moved_on":
+        advance_ack = (f"직전 개념 '{tr.get('closed_label', '')}'에서 학습자가 맞힌 부분을 구체적으로 인정하고, 이유와 적용은 여기까지 하고 넘어간다고 부담 없이 짧게 알리세요(두 문장 이내). 새 설명은 덧붙이지 마세요.")
+    elif tr.get("how") == "confirmed":
+        advance_ack = (f"직전 개념 '{tr.get('closed_label', '')}'에 대한 답을 인정하고 학습자가 실제로 말한 맞은 핵심만 정확한 표현으로 정리하세요(인정과 정리를 합쳐 두 문장 이내, 인정은 '좋아요' 같은 짧은 구절로 하고 내용은 정리 한 문장에만 담아 같은 말을 두 번 하지 마세요). "
+                       "학습자의 거친 표현은 confirmed_key_points의 정확한 용어·식으로 다듬어 말해도 되지만, 학습자가 말하지 않은 새 개념이나 조건은 덧붙이지 마세요.")
+    else:
+        advance_ack = (f"직전 개념 '{tr.get('closed_label', '')}'에 대한 학습자의 답을 한 문장으로 인정하세요. 새로운 설명은 덧붙이지 마세요."
+                       + (" 학습자가 넘어가자고 했으므로 확인하지 않은 부분은 마무리에서 다시 확인한다고 짧게 알리세요." if tr.get("how") == "skipped" else ""))
 
     instructions = {
-        "diagnostic_question": f"현재 개념 '{label}'의 이해를 확인하는 열린 질문 하나만 하세요. 개념 이름은 그대로 써도 되고, 쉬운 말로 직접 물으세요(예: '~에 대해 아는 대로 설명해 볼래요?'). 선택지, 빈칸, 문장 시작 힌트, 답을 말해 주는 질문, 돌려 말하는 비유나 수수께끼는 금지입니다. 설명을 먼저 길게 하지 마세요." + QRULE,
-        "advance_next": ("직전 개념 '" + str(tr.get("closed_label", "")) + "'에 대한 학습자의 답을 한 문장으로 인정하세요(새로운 설명을 덧붙이지 마세요)."
-                         + (" 학습자가 넘어가자고 했으므로 확인하지 않은 부분은 마무리에서 다시 확인한다고 짧게 알리세요." if tr.get("how") == "skipped" else "")
-                         + f" 그다음 새 개념 '{label}'에 대한 열린 진단 질문 하나만 하세요. 쉬운 말로 직접 물으세요(예: '~에 대해 아는 대로 설명해 볼래요?'). 선택지, 빈칸, 핵심어를 쓰지 마세요." + QRULE),
-        "reveal_and_next": (f"학습자가 같은 개념에서 두 번 답하지 못했습니다. '{tr.get('closed_label', '')}'의 핵심 답을 reveal_key_points를 바탕으로 1~3문장으로 알려 주고, "
-                            f"이 개념은 마무리 확인에서 다시 확인한다고 알리세요. 그다음 새 개념 '{label}'에 대한 열린 진단 질문 하나만 하세요. 쉬운 말로 직접 물으세요(예: '~에 대해 아는 대로 설명해 볼래요?'). 알려 준 개념은 다시 묻지 마세요. 설명은 알려 주는 개념의 범위 안에서만 하고 다음 개념의 내용은 미리 말하지 마세요. 설명 방식은 {strategy}." + QRULE),
-        "hint": ("학습자가 막혔습니다. 정답이나 설명을 주지 말고 '단서 하나'만 주세요. 규칙: (1) 전체 2문장 이내, 150자 이내. "
-                 "(2) 직전 질문을 이어서, target_key_point로 가는 쉬운 단서가 되게 하세요. target_key_point의 내용을 직접 말하면 안 됩니다. "
-                 "(3) 개념·용어는 한 가지만 언급하고, 여러 대상의 기능을 나열하지 마세요. "
-                 "(4) 직전 질문보다 한 단계 작고 쉬운 질문 하나로 끝내세요. 직전 질문과 무관한 주제로 바꾸지 마세요. "
-                 "(5) '모르겠다'는 말에 '좋아요'라고 반응하지 말고 '괜찮아요' 정도로 짧게 받으세요. "
-                 "(6) 직전 질문을 반복하거나 말만 바꿔 다시 묻지 마세요. (8) '~해 보세요' 같은 지시문을 따로 붙이지 말고, 단서가 담긴 질문 하나로만 쓰세요. 단위는 mol/L, g/mol, mL, L처럼 정확히 쓰세요."
-                 + (" (7) 이미 힌트를 한 번 줬으므로 이번에는 직전 힌트보다 딱 한 단계만 더 구체적인 단서를 주되, 정답이나 핵심 요소를 직접 말하지는 마세요." if cur.get("help_level") == 2 else "")),
-        "guided_question": (f"학습자가 이미 맞힌 부분(앞선 대화에서 이미 말한 내용 포함)은 한 문장으로 인정하고 같은 것을 다시 묻지 마세요. 질문 문장에는 빠진 요소의 내용이나 그 핵심어를 넣지 말고, 그 요소가 속한 영역만 가리키는 열린 질문을 하세요(예: '그 값은 어떻게 정해지나요?'). 인정은 이렇게 하세요(방금 AI가 한 설명을 따라 말한 경우에는 '경로는 설명한 그대로예요'처럼 범위를 한정해 짧게만 받으세요). 빠진 핵심 요소 하나만"
-                            + (f"('{missing}')" if missing else "") + " 스스로 말하게 하는 질문 하나만 하세요. 그 요소의 답을 직접 알려 주거나 빈칸 형태로 만들지 마세요. 이전 질문을 반복하지 마세요. 설명을 덧붙이지 말고 150자 이내로 쓰세요." + QRULE),
-        "diagnose_misconception": "오개념이 드러난 지점을 '이 부분을 한 번 더 살펴볼게요' 정도로 짧게 짚되, 무엇이 어떻게 틀렸는지(예: 서로 바뀌었다)나 정답은 말하지 말고, 'A가 아니라 B' 같은 대비 표현도 쓰지 말고(정답을 알려 주는 셈이 됩니다), 그 지점을 스스로 드러내게 하는 질문(또는 더 쉬운 선행 개념 질문) 하나만 하세요." + QRULE,
-        "full_explanation": (f"사용자의 명시적 요청이므로 {strategy} 방식으로 explain_key_points를 바탕으로 설명하세요(600자 이내). "
-                             "설명 끝에 핵심을 확인하는 짧은 적용 질문 하나를 붙이세요('이해했어요?' 같은 질문은 금지). 설명으로 건너뛴 부분은 확인된 것으로 취급하지 않습니다."),
+        "diagnostic_question": f"현재 개념 '{label}'의 이해를 확인하는 " + OPEN_Q + " 설명을 먼저 길게 하지 마세요." + QRULE + WIDE,
+        "reasoning_question": (f"방금 학습자의 답('{label}')에서 맞은 부분을 구체적으로 인정하고, 학습자가 말한 핵심만 한 문장으로 정리하세요(confirmed_key_points는 용어 확인용이며 학습자가 말하지 않은 내용은 넣지 마세요). "
+                               "그다음 그 개념이 '왜 그렇게 되는지' 또는 '어떻게 그렇게 되는지' 이유를 자기 말로 한 가지만 말해 보게 하는 쉬운 질문 하나만 하세요. 정답이나 핵심 요소는 질문에 넣지 말고, 어려운 용어 없이 일상적인 말로 답해도 된다고 가볍게 알려 부담을 낮추세요." + QRULE),
+        "transfer_question": ((f"방금 학습자가 말한 이유에서 맞은 부분을 후하게 한 문장으로 인정하세요(새 설명은 덧붙이지 마세요). " if tr.get("from_stage") == "R" else
+                               f"방금 학습자의 답에서 맞은 부분을 구체적으로 인정하고 학습자가 말한 핵심만 한 문장으로 정리하세요(말하지 않은 내용은 넣지 마세요). ")
+                              + f"그다음 '{label}'을(를) 아주 작은 새 상황 하나에 적용해 보는 쉬운 질문 하나만 하세요. 학습자가 방금 말한 내용을 그대로 되풀이하면 답이 되는 질문은 피하고, 학습자가 아직 말하지 않은 측면(조건이 바뀌면 달라지는 것, 변하지 않는 것)을 물으세요. 상황의 조건과 답해야 할 것을 질문 안에 분명히 적고, recent_dialogue의 사례와 겹치지 않게 하며, 정답이나 풀이 단서는 넣지 마세요. 완벽하지 않아도 괜찮다고 가볍게 알려도 좋습니다." + QRULE),
+        "advance_next": advance_ack + f" 그다음 새 개념 '{label}'에 대한 " + OPEN_Q + QRULE + WIDE,
+        "reveal_and_next": (f"학습자가 같은 개념에서 두 번 답하지 못했습니다. 먼저 '괜찮아요'처럼 짧게 받고, '{tr.get('closed_label', '')}'의 핵심 답을 reveal_key_points에서 구체적으로 1~3문장 알려 주세요(필요한 조건·값·관계를 포함하되, 이 질문과 무관한 확장 주제는 넣지 마세요). context에 misconception_to_correct가 있으면 그 오해를 바로잡는 문장을 반드시 포함하세요. 이 개념은 마무리 확인에서 다시 확인한다고 알리세요. "
+                            f"그다음 새 개념 '{label}'에 대한 " + OPEN_Q + f" 알려 준 개념은 다시 묻지 말고, 다음 개념의 내용은 미리 말하지 마세요. 설명 방식은 {strategy}." + QRULE + WIDE),
+        "hint": ("학습자가 막혔습니다. 정답이나 설명 없이 단서 하나만 주세요. (1) 2문장 이내, 150자 이내. (2) 직전 질문을 이어서 target_key_point로 가는 쉬운 단서가 되게 하되 target_key_point의 내용을 직접 말하지 마세요. "
+                 "(3) 개념·용어는 한 가지만 언급하고 여러 대상을 나열하지 마세요. (4) 직전 질문보다 한 단계 작고 쉬운 질문 하나로 끝내되, 질문이 한 가지로만 읽히도록 필요한 전제(질문이나 학습자 말에 이미 나온 것, 예: 어느 축이 무엇인지)를 질문 안에 적으세요. 학습자가 맞게 알아본 부분이 있으면 '괜찮아요' 뒤에 짧게 인정하고, 직전 질문과 무관한 주제로 바꾸거나 직전 질문을 반복·말만 바꿔 묻지 마세요. "
+                 "(5) '모르겠다'에는 '좋아요' 대신 '괜찮아요'로 짧게 반응하세요. (6) '~해 보세요' 같은 지시문 없이 단서가 담긴 질문 하나로만 쓰세요. 단위는 mol/L, g/mol, mL, L처럼 정확히 쓰세요."
+                 + (" (7) 이미 힌트를 한 번 줬으므로 직전 힌트보다 딱 한 단계만 더 구체적으로 하되 정답이나 핵심 요소는 직접 말하지 마세요." if cur.get("help_level") == 2 else "")),
+        "guided_question": ("학습자가 이미 맞힌 부분(앞선 대화 포함)은 한 문장으로 인정하고 다시 묻지 마세요(방금 AI가 설명한 것을 따라 말한 경우에는 '설명한 그대로예요'처럼 범위를 한정해 짧게만 받으세요). "
+                            "빠진 핵심 요소 하나만" + (f"('{missing}')" if missing else "") + " 스스로 말하게 하는 질문 하나만 하세요. 그 요소의 내용이나 핵심어를 질문에 넣거나 빈칸으로 만들지 말고, 그 요소가 속한 영역만 가리키세요(예: '그 값은 어떻게 정해지나요?'). 이전 질문을 반복하지 말고 설명 없이 250자 이내로 쓰세요." + QRULE),
+        "diagnose_misconception": "학습자가 한 말 중 걸리는 부분을 학습자의 표현 그대로 짧게 가리키며('~라고 하셨는데') 시작하세요. 무엇이 어떻게 틀렸는지, 정답, 'A가 아니라 B' 같은 대비는 말하지 마세요. 그 부분을 스스로 점검하게 하는 좁은 질문 하나만 하세요(예: 그 말이 성립하는 경우와 아닌 경우를 가르는 한 가지, 또는 더 쉬운 선행 개념). '아는 것 두세 개를 골라 설명'하는 넓은 질문은 쓰지 마세요." + QRULE,
+        "full_explanation": (f"사용자가 요청했으므로 {strategy} 방식으로 explain_key_points를 바탕으로 설명하세요(600자 이내). "
+                             "끝에 핵심을 확인하는 짧은 적용 질문 하나를 붙이세요('이해했어요?'는 금지). 설명으로 건너뛴 부분은 확인된 것으로 취급하지 않습니다."),
         "partial_explanation": f"필요한 부분만 {strategy} 방식으로 부분 설명하고, 학습자가 나머지를 이어가도록 질문 하나만 하세요.",
         "prerequisite_explanation": f"부족한 선수 개념을 {strategy} 방식으로 아주 짧게 설명하고 확인 질문 하나만 하세요.",
-        "practice": f"학습자가 연습을 원합니다. practice_session의 target_label('{label}')을 목표로 고정하고, 새로운 상황의 문제를 내세요. 문제는 등록된 하위 개념 범위 안에서만 내고, 그 범위를 벗어난 개념(예: 다른 단원의 계산)은 쓰지 마세요. 학습자가 문제 개수를 말했다면(최대 5개) 그 개수만큼 번호를 붙여 한 번에 내고, 말하지 않았다면 한 문제만 내세요. "
-                     "recent_dialogue에서 이미 나온 사례·질문과 겹치지 않는 서로 다른 사례로 만들고, 정답이나 풀이 단서는 주지 마세요. 마지막에 번호와 함께 답해 달라고 한 문장으로 안내하세요.",
-        "review": ((f"먼저 학습자의 직전 복습 답에서 맞은 부분을 한 문장으로 인정하고, 지금은 '부분적 이해(State 2)'라서 새로운 상황에서 한 번 더 확인되면 안정적 이해로 올라간다고 짧게 알리세요. "
-                    f"그다음 '{label}'을(를) 이전 복습·대화에 나온 물질이나 사례와 다른 새 상황에 적용해 보게 하고, 그렇게 되는 이유도 한 문장 덧붙이게 하는 질문 하나만 하세요. 정답이나 풀이 단서를 주지 마세요.")
-                   if (record.get("review_session") or {}).get("extra") else
-                   f"'{label}'을(를) 이전과 다른 상황이나 예시로 짧게 복습하게 하는 질문 하나만 하세요. 정답을 먼저 주지 마세요.") + QRULE,
-        "review_done": "해요체로 쓰세요. 학습자의 복습 답에서 맞은 부분을 구체적으로 한 문장 인정하고, 복습이 잘 됐다고 짧게 마무리하세요. 새 질문과 새 설명은 하지 마세요.",
-        "review_reveal": "해요체로 쓰세요. 복습 질문에 두 번 충분히 답하지 못했습니다. reveal_key_points를 바탕으로 핵심 답을 2~3문장으로 차분히 알려 주고, 강의 자료로 한 번 더 확인해 보라고 권하세요. 질문은 하지 마세요.",
+        "practice": (f"학습자가 연습을 원합니다. practice_session의 target_label('{label}')을 목표로 새로운 상황의 문제를 내세요. 등록된 하위 개념 범위를 벗어난 개념은 쓰지 마세요. "
+                     "학습자가 문제 개수를 말했다면(최대 5개) 그 개수만큼 번호를 붙여 한 번에 내고, 아니면 한 문제만 내세요. recent_dialogue의 사례·질문과 겹치지 않는 서로 다른 사례로 만들고 정답이나 풀이 단서는 주지 마세요. 마지막에 번호와 함께 답해 달라고 한 문장으로 안내하세요."),
+        "review": review_ins + QRULE,
+        "review_done": "해요체로 쓰세요. 학습자의 복습 답에서 맞은 부분을 구체적으로 한 문장 인정하고 복습이 잘 됐다고 짧게 마무리하세요. 새 질문과 새 설명은 하지 마세요. context에 remaining_weak_labels가 있으면 마지막에 '남은 개념(이름들)도 복습하려면 복습 한 번 더라고 말해 주세요'처럼 질문이 아닌 안내 한 문장을 덧붙이세요.",
+        "review_reveal": "해요체로 쓰세요. 복습 질문에 두 번 충분히 답하지 못했습니다. reveal_key_points로 핵심 답을 2~3문장으로 차분히 알려 주고 강의 자료로 한 번 더 확인해 보라고 권하세요. 질문은 하지 마세요.",
         "wrap_up_check": reveal_first + to_wrap + wrap_instruction,
-        "wrap_up_summary": (reveal_first + to_wrap + "마무리 확인이 끝났습니다. 줄바꿈 목록 없이 3~4문장으로 쓰세요. (1) confirmed_skills가 있으면 잘 확인된 개념을 한 문장으로 먼저 인정하세요. (2) weak_skills는 이름과 아직 부족한 부분(weak_dimensions)을 짧게 알리세요(개념은 확인됐어도 weak_dimensions가 있으면 그 항목만 짚으세요)(정답을 길게 가르치지 마세요). (3) untested_note가 있으면 어느 개념의 어떤 항목이 아직 안 다뤄졌는지 한 문장으로만 알리고 부족하다고 표현하지 마세요. "
-                            "(4) not_started_skills가 있으면 아직 시작하지 않은 개념이라고 이름만 한 문장으로 알리세요(약하다고 하지 마세요). weak_skills가 있을 때만 그다음 '복습할지, 다음 단원으로 넘어갈지'를 질문 하나로 물어보세요. 복습 질문은 이번 한 번만 합니다. weak_skills가 비어 있으면 부족한 부분이 없다고 알리고 복습은 권하지 말고 다음에 공부할 방향만 질문 하나로 물어보세요. context의 weak_skills와 untested_note에 없는 부족함은 지어내지 마세요(recent_dialogue의 이전 요약은 낡았을 수 있습니다)."),
-        "pause_ack": ("학습자가 지금은 쉬겠다고 했습니다. 해요체로 2~3문장만 쓰세요. (1) 힘들었던 마음을 한 문장으로 받아 주고 쉬어 가는 것이 괜찮다고 하세요. "
-                      "(2) 지금까지의 기록은 저장해 두었고 다시 올 때 이어서 할 수 있다고 알리세요. 질문, 새 설명, 정답 공개, 복습 문제는 하지 마세요."),
-        "progress_report": ("해요체로 2~3문장만 쓰세요. 학습자가 자신의 학습 현황과 복습할 내용을 물었습니다. 오직 context의 confirmed_skills, weak_skills, untested_note에 있는 사실만 말하세요"
-                            "(recent_dialogue의 이전 요약은 낡았을 수 있으니 따르지 마세요). 부족한 항목이 없으면 부족한 부분이 없다고만 하세요. 퀴즈나 새 문제를 내지 말고, "
-                            "복습할 항목이 있으면 그 항목을 짚고 '복습하고 싶으면 말씀해 주세요'로 끝내세요. 자세한 표는 /progress에서 볼 수 있다고 한 번 알려도 좋습니다."),
-        "closing_ack": "해요체로 쓰세요. 마무리하겠다고 선언하지 말고 학습자의 말에 짧게 반응하세요. 복습을 다시 권하지 말고, 새 주제를 공부하고 싶으면 말씀해 달라고만 안내하세요. 질문은 하지 않아도 됩니다.",
+        "wrap_up_summary": (reveal_first + to_wrap + "마무리 확인이 끝났습니다. 줄바꿈 목록 없이 3~4문장으로 쓰세요. (1) confirmed_skills가 있으면 잘 확인된 개념을 한 문장으로 먼저 인정하세요. "
+                            "(2) weak_skills는 이름과 아직 부족한 부분(weak_dimensions)만 짧게 알리세요(정답을 길게 가르치지 마세요). 개념은 확인됐어도 weak_dimensions가 있으면 그 항목만 짚으세요. "
+                            "(3) untested_note가 있으면 어느 개념의 어떤 항목이 아직 안 다뤄졌는지 한 문장으로만 알리고 부족하다고 표현하지 마세요. (4) not_started_skills가 있으면 아직 시작하지 않은 개념이라고 이름만 한 문장으로 알리세요(약하다고 하지 마세요). "
+                            "weak_skills가 있을 때만 '복습할지, 다음 단원으로 넘어갈지'를 질문 하나로 물으세요(복습 질문은 이번 한 번만). weak_skills가 비어 있으면 부족한 부분이 없다고 알리고 복습은 권하지 말고 다음에 공부할 방향만 질문 하나로 물으세요. "
+                            "context의 weak_skills와 untested_note에 없는 부족함은 지어내지 마세요(recent_dialogue의 이전 요약은 낡았을 수 있습니다)."),
+        "pause_ack": "학습자가 지금은 쉬겠다고 했습니다. 해요체로 2~3문장만 쓰세요. (1) 힘들었던 마음을 한 문장으로 받아 주고 쉬어 가는 것이 괜찮다고 하세요. (2) 지금까지의 기록은 저장해 두었고 다시 올 때 이어서 할 수 있다고 알리세요. 질문, 새 설명, 정답 공개, 복습 문제는 하지 마세요.",
+        "progress_report": ("해요체로 2~3문장만 쓰세요. 학습자가 자신의 학습 현황과 복습할 내용을 물었습니다. context의 confirmed_skills, weak_skills, untested_note에 있는 사실만 말하세요(recent_dialogue의 이전 요약은 낡았을 수 있습니다). "
+                            "부족한 항목이 없으면 없다고만 하세요. 퀴즈나 새 문제는 내지 말고, 복습할 항목이 있으면 짚은 뒤 '복습하고 싶으면 말씀해 주세요'로 끝내세요. 자세한 표는 /progress에서 볼 수 있다고 한 번 알려도 좋습니다."),
+        "closing_ack": "해요체로 쓰세요. 마무리하겠다고 선언하지 말고 학습자의 말에 짧게 반응하세요. 복습을 다시 권하지 말고 새 주제를 공부하고 싶으면 말씀해 달라고만 안내하세요. 질문은 하지 않아도 됩니다.",
         "offer_direction_choice": ("학습자의 불편을 한 문장으로 인정하고, ① " + ("다른 주제로 넘어가기" if record.get("unit_status") == "completed" else "마무리로 넘어가기" if not record.get("_has_next_open") else "다음 개념으로 넘어가기")
                                    + " ② 이 개념 설명 듣기 ③ 문제로 확인하기 중에서 고르게 하는 질문 하나만 하세요. 같은 질문을 반복하지 마세요."),
-        "offer_learner_choice": "현재 완료된 하위 개념의 확인 결과만 간단히 알리고, 더 어려운 적용·복습·다음 개념 중 사용자가 선택하도록 질문 하나만 하세요. 다른 하위 개념의 미확인 상태를 숨기거나 전체 주제 숙달이라고 말하지 마세요.",
+        "offer_learner_choice": "현재 완료된 하위 개념의 확인 결과만 간단히 알리고, 더 어려운 적용·복습·다음 개념 중 사용자가 고르게 하는 질문 하나만 하세요. 다른 하위 개념의 미확인 상태를 숨기거나 전체 주제를 숙달했다고 말하지 마세요.",
         "next_unit_choice": "해요체로 쓰세요. 현재 학습 단위의 미확인 항목은 기록해 둔 채, 다음에 공부할 주제나 범위를 한 가지 질문으로 확인하세요.",
         "goal_clarification": "학습 목표나 범위가 불분명하므로 확인 질문 하나만 하세요. 이미 알려 준 정보는 다시 묻지 마세요.",
-        "skip_check": "사용자의 선택을 존중해 현재 확인을 건너뛰고, 미확인으로 남는다고 짧게 알리세요.",
-        "continue_task": "현재 진행 중인 과제를 이어가세요. 학습자가 이미 맞힌 부분은 인정하고, 아직 해결하지 못한 가장 작은 단계 하나만 질문하세요.",
+        "skip_check": "사용자의 선택을 존중해 현재 확인을 건너뛰고 미확인으로 남는다고 짧게 알리세요.",
+        "continue_task": "진행 중인 과제를 이어가세요. 이미 맞힌 부분은 인정하고 아직 해결하지 못한 가장 작은 단계 하나만 질문하세요.",
         "transfer_task": "새로운 조건의 적용 문제 하나만 제시하세요."
     }
     return instructions.get(action, instructions["diagnostic_question"])
+
+
+_GENERIC_LABEL_WORDS = {"기본", "개념", "해석", "계산", "이해", "의미", "설명", "적용", "용어", "원리", "정의", "관계", "역할", "기초"}
+
+
+def _off_target(text, label):
+    """응답이 대상 개념의 이름(한글·영어 단어)을 하나도 담지 않으면 True. 라벨이 없거나 판단할 수 없으면 False."""
+    label = str(label or "")
+    words = re.findall(r"[가-힣A-Za-z]{2,}", label)
+    words = [w for w in words if w not in _GENERIC_LABEL_WORDS]
+    if not words:
+        return False
+    low = str(text).lower()
+    for w in words:
+        if w.lower() in low or (len(w) >= 3 and w[:-1].lower() in low):
+            return False
+    return True
 
 
 def _make_response(user_text, action, record, assessment, intent):
@@ -1240,6 +1327,7 @@ def _make_response(user_text, action, record, assessment, intent):
         "active_task": record.get("active_task"),
         "practice_session": record.get("practice_session"),
         "recent_dialogue": messages[-6:],
+        "learner_preferences": dict(learner_prefs),
         "evidence_note": assessment.get("evidence_note", ""),
         "misconception_note": assessment.get("misconception_note", ""),
         "learner_message": user_text
@@ -1253,18 +1341,38 @@ def _make_response(user_text, action, record, assessment, intent):
         context["target_key_point"] = (assessment.get("missing_key_point") or (kps[0] if kps else ""))
     if action == "review_reveal":
         context["reveal_key_points"] = sk.get("key_points", [])
+    if action in ("reasoning_question", "transfer_question"):
+        context["confirmed_key_points"] = sk.get("key_points", [])     # 용어 확인용 (질문에 답을 넣지 않는다)
+    if tr and tr.get("how") == "confirmed" and tr.get("closed_sid") in recs:
+        # v3.14: 맞힌 개념은 넘어가기 전에 한 문장으로 다시 정리해 준다 (피드백: 옳은 설명 후 개념을 한 번 더 확인)
+        context["confirmed_key_points"] = recs[tr["closed_sid"]].get("key_points", [])
     if assessment.get("out_of_scope_error") and action not in ("pause_ack", "closing_ack"):
         context["out_of_scope_error"] = str(assessment.get("out_of_scope_error"))[:200]
     if tr and tr.get("how") == "revealed" and tr.get("closed_sid") in recs:
         context["reveal_key_points"] = recs[tr["closed_sid"]].get("key_points", [])
+        _mis = [m.get("note", "") for m in recs[tr["closed_sid"]].get("misconceptions", [])[-2:] if m.get("note")]
+        if _mis:
+            context["misconception_to_correct"] = _mis      # 정답 공개 때 이 오해를 바로잡는다
     if action in ("wrap_up_summary", "progress_report"):
         context.update(_summary_parts(record))
+    if action == "review_done":
+        _rem = [sk2.get("label", sid2) for sid2, sk2 in recs.items()
+                if sid2 in record.get("skill_registry", {}) and sk2.get("state") != "State3" and not sk2.get("unvisited")]
+        if _rem:
+            context["remaining_weak_labels"] = _rem
     response = client.responses.create(
         model=MODEL,
         instructions=RESPONSE_PROMPT,
         input=json.dumps(context, ensure_ascii=False)
     )
-    return response.output_text.strip()
+    text = response.output_text.strip()
+    if action == "wrap_up_check" and _off_target(text, (record.get("wrap_target") or {}).get("label", "")):
+        context["must_ask_about"] = (record.get("wrap_target") or {}).get("label", "")
+        context["retry_note"] = "직전 초안이 대상 개념과 무관한 질문이었습니다. 반드시 must_ask_about 개념에 대한 질문 하나로 다시 쓰세요."
+        response = client.responses.create(model=MODEL, instructions=RESPONSE_PROMPT,
+                                           input=json.dumps(context, ensure_ascii=False))
+        text = response.output_text.strip()
+    return text
 
 
 def _safe_short_response(text, limit=MAX_RESPONSE_CHARS):
@@ -1309,6 +1417,10 @@ def _display_turn(response_text, record):
         where = "학습 단위 완료"
     else:
         where = f"현재 개념: {active.get('label')}" if active else "설정 중"
+        if active and PROGRESSION_MODE == "per_skill":
+            _st = (record.get("skill_records", {}).get(active_sid) or {}).get("stage", "C")
+            if _st in ("C", "R", "T"):
+                where += " (" + {"C": "개념 확인", "R": "이유 확인", "T": "적용 확인"}[_st] + ")"
     state_text = f" · 상태: {active.get('state_label')}" if active else ""
     if record.get("unit_status") == "completed":
         state_text = ""      # 단원이 끝나면 한 개념의 State가 전체처럼 보이지 않게 개념별 상태는 /progress에서만 본다
@@ -1371,7 +1483,7 @@ FORMAT: plain conversational Korean, at most 450 characters in total, 4-6 short 
 If previous_advice is present, use a technique that is clearly different from it and do not repeat its example.
 Do not generate a sub-concept registry, quiz question, or assess understanding.
 """
-    response = client.responses.create(model=MODEL, instructions=instructions,
+    response = client.responses.create(model=MODEL, instructions=instructions + _pref_instruction(),
                                        input=json.dumps(prompt, ensure_ascii=False))
     return _safe_short_response(response.output_text.strip(), limit=MAX_EXPLAIN_CHARS + 300)
 
@@ -1566,11 +1678,12 @@ def _classify_registry_confirmation(user_text, record):
 You classify the learner's intent while they are reviewing a proposed list of sub-concepts.
 Interpret the COMPLETE message in context, not by matching a list of keywords.
 Return JSON only:
-{"decision":"confirm|revise|other_request|unclear","revision_request":"","reason":""}
+{"decision":"confirm|revise|new_topic|other_request|unclear","revision_request":"","reason":""}
 
 Rules:
 - confirm: decide whether the learner's communicative intent is to accept the current proposal and proceed. Short, colloquial, indirect, abbreviated, or nonstandard expressions ("좋은데?", "ㅇㅋ", "그대로 가자") are clear confirmation when the context makes the meaning clear.
-- revise: the learner wants to change THE LIST itself: remove, add, regroup, reorder, rename, or switch topic. Extract the requested changes in revision_request.
+- revise: the learner wants to change THE LIST itself while keeping the same topic: remove, add, regroup, reorder, or rename sub-concepts. Extract the requested changes in revision_request.
+- new_topic: the learner wants to study a DIFFERENT subject than context.topic (for example the topic is 상평형도 and the learner says "활성화에너지 공부하고 싶어" or "이건 됐고 롤링에 대해 알고 싶어"). This replaces the whole unit; it is never an edit of the current list. A change inside the same topic is revise, not new_topic.
 - other_request: the learner asks a question or makes a request that is NOT an edit of the list (for example asks you to explain something, make exam questions, or teach a memorization method). Such a request must be answered first; it is never a list revision.
 - unclear: use only when the message genuinely does not reveal whether the learner wants to proceed, revise, or ask something.
 - If the message contains both approval and a requested change to the list, choose revise.
@@ -1580,7 +1693,7 @@ Rules:
     try:
         data = _json_call(instructions, context)
         decision = data.get("decision")
-        if decision not in ("confirm", "revise", "other_request", "unclear"):
+        if decision not in ("confirm", "revise", "new_topic", "other_request", "unclear"):
             return {"decision": "unclear", "revision_request": "", "reason": "판정 결과가 유효하지 않습니다."}
         return {
             "decision": decision,
@@ -1636,9 +1749,20 @@ Rules:
 
 def _begin_diagnostic_after_registry_confirmation(user_text):
     """Use contextual LLM intent classification; confirmation is setup metadata, not evidence."""
-    global learning_phase, awaiting_registry_confirmation
+    global learning_phase, awaiting_registry_confirmation, pending_new_unit, pending_post_explanation_check
     record = _record()
     decision = _classify_registry_confirmation(user_text, record)
+
+    if decision["decision"] == "new_topic":
+        # 목록을 확인하는 중에 전혀 다른 주제를 말하면 목록 수정이 아니라 새 학습 단위로 시작한다 (이전 단위 기록은 보존).
+        messages.clear()
+        pending_post_explanation_check = False
+        pending_start_requests.clear()
+        pending_new_unit = True
+        learning_phase = "awaiting_topic"
+        awaiting_registry_confirmation = False
+        _handle_learning_start(user_text, force_new=True)
+        return True
 
     if decision["decision"] == "other_request":
         # 목록 확인 중에 다른 질문·요청이 오면 먼저 답하고 확인으로 돌아온다 (피드백 1번).
@@ -1677,7 +1801,7 @@ def _begin_diagnostic_after_registry_confirmation(user_text):
         prior_vulnerable = _cross_unit_vulnerabilities(learning_context.get("concept_id"))
         confirm_input = {"topic": learning_context["topic"], "goal": learning_context["goal"],
                          "first_skill": label, "instruction": "Ask one diagnostic question only. Output polite Korean (해요체)."}
-        confirm_instructions = START_CONFIRM_PROMPT
+        confirm_instructions = START_CONFIRM_PROMPT + _pref_instruction()
         if prior_vulnerable:
             confirm_input["prior_misconceptions_from_other_units"] = prior_vulnerable
             confirm_instructions = START_CONFIRM_PROMPT + PRIOR_VULNERABILITY_RULE
@@ -1707,6 +1831,10 @@ def study_turn(user_text, forced_intent=None):
     global pending_post_explanation_check
     if not user_text or not user_text.strip():
         print("내용을 입력해 주세요.")
+        return
+    _pref_changed = _update_learner_prefs(user_text)      # v3.14: 용어 표기 선호는 어떤 단계에서든 먼저 반영한다
+    if _pref_changed and not forced_intent and len(user_text.strip()) <= 40 and learning_context.get("topic"):
+        print("하던 내용은 그대로예요. 직전 질문에 이어서 답해 주세요.")      # 설정 변경은 학습 답도 불만도 아니다
         return
     # Topic-switch and setup gates run BEFORE the evidence evaluator.
     # A new subject is a new learning unit, not an unmapped answer in the old registry.
@@ -1759,6 +1887,20 @@ def study_turn(user_text, forced_intent=None):
             return
 
     intent = forced_intent or _detect_explicit_intent(user_text, assessment.get("intent", "continue"))
+    # v3.14: 규칙 문구가 없어도 평가기가 "지금 학습 중인 것과 다른 새 주제"라고 판단하면 새 학습 단위로 시작한다.
+    # (예: 중력 학습 중 "활성화에너지에 대해 알고 싶어" → 마무리 질문으로 이어지지 않게)
+    _new_topic = str(assessment.get("topic_detected") or "").strip()
+    _cur_topic = str(learning_context.get("topic") or "").strip()
+    if (intent == "change_goal" and not forced_intent and _new_topic and _cur_topic
+            and _new_topic not in _cur_topic and _cur_topic not in _new_topic):
+        messages.clear()
+        pending_post_explanation_check = False
+        pending_start_requests.clear()
+        pending_new_unit = True
+        learning_phase = "awaiting_topic"
+        awaiting_registry_confirmation = False
+        _handle_learning_start(user_text, force_new=True)
+        return
     if intent == "explain" and assessment.get("explicit_explain_request") is False:
         # "모르겠어"는 설명 요청이 아니라 막힘 신호다: 질문→힌트→(답 안내) 순서로 도움을 올린다 (규칙 6).
         intent = "continue"
@@ -1838,7 +1980,7 @@ def study_turn(user_text, forced_intent=None):
         print("평가와 상태 기록은 저장되었지만, 사용자 응답 생성에 실패했어요.")
         return
 
-    if action in ("hint", "guided_question") and len(response_text) > MAX_HINT_CHARS:
+    if action == "hint" and len(response_text) > MAX_HINT_CHARS:
         # 힌트가 설명으로 변하면 다시 쓰게 한다 (규칙 6: 한 턴에 도움 한 단계만).
         repair = client.responses.create(
             model=MODEL,
@@ -1930,6 +2072,9 @@ def study_turn(user_text, forced_intent=None):
         active_state_for_log = record.get("skill_records", {}).get(active_sid_for_log, {}).get("state", "Unconfirmed")
         print(f"Active skill: {active_sid_for_log} | State: {active_state_for_log} | Evaluated skill transition: {old_skill_state} -> {new_skill_state} | Next action: {action} | Intent: {intent}")
         print("Transition reason:", transition_reason)
+        print("Dimensions:", f'C={assessment.get("concept", "unknown")}({assessment.get("concept_source", "unknown")}) '
+              f'R={assessment.get("reasoning", "unknown")}({assessment.get("reasoning_source", "unknown")}) '
+              f'T={assessment.get("transfer", "unknown")}({assessment.get("transfer_source", "unknown")})')
         print("Evidence:", assessment.get("evidence_note", ""))
         print("Rule check:", log["rule_check"])
 
@@ -1942,10 +2087,14 @@ def _dbg(msg):
 
 def _limit_for(action, record):
     tr = record.get("transition") or {}
-    if action in ("full_explanation", "reveal_and_next", "wrap_up_summary", "review_reveal", "practice"):
+    if action in ("full_explanation", "reveal_and_next", "wrap_up_summary", "review_reveal", "practice", "review"):
         return MAX_EXPLAIN_CHARS
-    if action in ("hint", "guided_question"):
+    if action == "hint":
         return MAX_HINT_CHARS      # 규칙 6: 힌트는 한 단계만, 짧게
+    if action in ("reasoning_question", "transfer_question") or (action == "advance_next" and tr.get("how") in ("confirmed", "moved_on")):
+        return MAX_STAGE_CHARS     # 인정·정리 문장 뒤의 질문이 잘리지 않게 여유를 둔다
+    if action == "guided_question":
+        return MAX_QUESTION_CHARS  # v3.14: 질문은 시작 조건과 답변 범위가 보이도록 힌트보다 조금 길게 허용
     if tr.get("how") == "revealed" and action in ("wrap_up_check",):
         return MAX_EXPLAIN_CHARS
     return MAX_RESPONSE_CHARS
@@ -2043,7 +2192,7 @@ def _progress_panel_html(record):
     body = "".join(rows) if rows else '<div style="color:#64748b;">아직 등록된 하위 개념이 없습니다.</div>'
     return f"""
     <div style="font-family:Arial,'Apple SD Gothic Neo',sans-serif;margin:14px 0 18px;border:1px solid #d1d5db;
-                border-radius:12px;padding:13px 15px;background:var(--jp-layout-color0,#fff);color:var(--jp-ui-font-color1,#222);">
+                border-radius:12px;padding:13px 15px;background:#ffffff;color:#1f2937;">
       <div style="font-size:15px;font-weight:700;margin-bottom:9px;">학습 진행 상황</div>
       <div style="font-size:13px;line-height:1.9;">
         <div><b>현재 주제:</b> {html.escape(str(topic))}</div>
@@ -2068,7 +2217,7 @@ Do exactly what was asked, in polite Korean (해요체) only. Never mix 반말.
 If several things were asked, do all of them briefly. Keep it within about 600 Korean characters (an N-question list may be somewhat longer).
 Do not ask the learner anything. Do not mention sub-concepts, learning maps, evidence or states.
 """
-    response = client.responses.create(model=MODEL, instructions=instructions,
+    response = client.responses.create(model=MODEL, instructions=instructions + _pref_instruction(),
                                        input=json.dumps(prompt, ensure_ascii=False))
     return _safe_short_response(response.output_text.strip(), limit=MAX_EXPLAIN_CHARS + 400)
 
@@ -2094,7 +2243,8 @@ ACTION_RULES = {
     "hint": [6], "guided_question": [5, 6], "diagnose_misconception": [4],
     "full_explanation": [1, 8], "practice": [1], "review": [1, 10], "wrap_up_check": [10],
     "wrap_up_summary": [10], "closing_ack": [10], "pause_ack": [10], "progress_report": [1], "review_done": [1], "review_reveal": [1, 10], "offer_direction_choice": [1],
-    "next_unit_choice": [1], "goal_clarification": [1], "offer_learner_choice": [9]
+    "next_unit_choice": [1], "goal_clarification": [1], "offer_learner_choice": [9],
+    "reasoning_question": [3, 5, 7], "transfer_question": [3, 5, 7]
 }
 
 
@@ -2102,7 +2252,7 @@ ASK_COUNT_ACTIONS = {"diagnostic_question", "guided_question", "hint", "diagnose
                      "advance_next", "reveal_and_next"}
 
 
-TASK_ACTIONS = ASK_COUNT_ACTIONS | {"wrap_up_check", "practice", "review", "full_explanation"}
+TASK_ACTIONS = ASK_COUNT_ACTIONS | {"wrap_up_check", "practice", "review", "full_explanation", "reasoning_question", "transfer_question"}
 
 
 NON_EVIDENCE_INTENTS = {"explain", "practice", "skip_check", "finish_unit", "review",
@@ -2156,6 +2306,9 @@ def _cross_unit_vulnerabilities(current_cid=None, limit=5):
 # ---------------------------
 # Unit wrap-up, persistence, and controls
 # ---------------------------
+import sys
+_ORIG_DISPLAY = display
+
 def show_progress(raw=False):
     """학습 진행 상황. 기본은 보기 쉬운 패널, raw=True 는 개발자용 JSON."""
     record = _record()
@@ -2186,9 +2339,10 @@ def finish_unit():
 
 def export_records(filename=SAVE_FILE, quiet=False):
     payload = {
-        "version": 3.13,
+        "version": 3.14,
         "saved_at": datetime.now().isoformat(timespec="seconds"),
         "learning_context": learning_context,
+        "learner_prefs": dict(learner_prefs),
         "concept_records": concept_records,
         "logs": logs,
         # 세션이 끊겨도 같은 단계에서 이어 갈 수 있도록 대화 단계도 함께 저장한다.
@@ -2208,8 +2362,11 @@ def export_records(filename=SAVE_FILE, quiet=False):
 
 
 def _autosave():
-    """매 턴 조용히 저장한다. 실패해도 학습 흐름을 막지 않는다."""
+    """매 턴 조용히 저장한다. 실패해도 학습 흐름을 막지 않는다.
+    저장할 학습 기록이 아직 없으면 저장하지 않는다 (새로 시작하자마자 이전 저장 파일을 빈 기록으로 덮어쓰지 않도록)."""
     try:
+        if not any(rec.get("skill_registry") for rec in concept_records.values()):
+            return
         export_records(quiet=True)
     except Exception as exc:
         _dbg(f"[autosave 실패] {exc!r}")
@@ -2226,6 +2383,8 @@ def load_records(filename=SAVE_FILE):
     learning_context = payload.get("learning_context", {"topic": "", "goal": "", "concept_id": ""})
     concept_records = payload.get("concept_records", {})
     logs = payload.get("logs", [])
+    learner_prefs.update({"term_style": DEFAULT_TERM_STYLE})
+    learner_prefs.update(payload.get("learner_prefs") or {})
     learning_context.setdefault("concept_id", "general")
     concept_records.setdefault(learning_context["concept_id"], _new_record())
     for rec in concept_records.values():
@@ -2277,14 +2436,23 @@ def reset_conversation():
 
 
 def reset_all_records(confirm=False):
-    global concept_records, logs
+    """모든 학습 기록·로그·대화 단계를 처음 상태로 되돌린다 (셀을 다시 실행해도 기록은 초기화되지 않으므로 필요한 명령)."""
+    global concept_records, logs, learning_phase, awaiting_registry_confirmation
+    global pending_new_unit, pending_study_strategy, pending_post_explanation_check
     if not confirm:
-        print("전체 기록 삭제를 확인하려면 reset_all_records(confirm=True)를 실행하세요.")
+        print("모든 학습 기록을 지우려면 /reset-all confirm 이라고 입력해 주세요. (코드로는 reset_all_records(confirm=True))")
         return
-    concept_records = {learning_context.get("concept_id") or "general": _new_record()}
+    learning_context.update({"topic": "", "goal": "", "concept_id": ""})
+    concept_records = {}
     logs = []
     messages.clear()
-    print("전체 학습 기록과 로그를 초기화했습니다.")
+    pending_start_requests.clear()
+    learning_phase = "idle"
+    awaiting_registry_confirmation = False
+    pending_new_unit = False
+    pending_study_strategy = None
+    pending_post_explanation_check = False
+    print("모든 학습 기록과 로그를 초기화했어요. 새 주제를 입력해 주세요.")
 
 
 def set_next_concept(topic, goal):
@@ -2308,6 +2476,7 @@ COMMAND_HELP = [
     ("/progress", "하위 개념별 학습 진행 상황(이해 상태와 개념·이유·적용 확인 여부)을 표로 보여 줘요."),
     ("/finish", "지금 단계를 마무리하고, 아직 확인되지 않은 부분을 점검한 뒤 요약해 줘요."),
     ("/new-topic", "새 학습 주제를 시작해요. 이전 학습 기록은 그대로 보존돼요."),
+    ("/reset-all", "모든 학습 기록을 지우고 처음부터 시작해요. (/reset-all confirm 으로 확인)"),
     ("/reset-chat", "지금까지의 대화 문맥만 비워요. 이해 상태와 학습 기록은 그대로 유지돼요."),
     ("/export", "학습 기록을 파일로 저장해요. (대화할 때마다 자동 저장도 돼요.)"),
     ("/load", "저장해 둔 학습 기록을 불러와 이어서 공부해요."),
@@ -2323,45 +2492,196 @@ def print_help():
     for cmd_name, desc in COMMAND_HELP:
         print(f"  {cmd_name.ljust(width)}  {desc}")
     print("명령어가 아닌 문장은 그대로 학습 대화로 이어져요.")
+    print("입력창이 사라지면 이 셀을 다시 실행해 주세요. 학습 기록은 그대로 이어져요.")
+    print("핵심 용어는 기본으로 한국어(English)로 함께 써요. 끄려면 '용어는 한국어로만 써 줘', 다시 켜려면 '영어로도 같이 표기해 줘'라고 말해 주세요.")
 
 
-def run_chat():
+INTRO_LINES = [
+    "STUDY LLM 시작. 공부하고 싶은 내용을 편하게 입력해 주세요.",
+    "· 명령어 목록은 /help 로 언제든 볼 수 있어요.",
+    "· 새 주제는 /new-topic, 지금 단계 마무리는 /finish, 끝낼 때는 /exit 를 입력해 주세요.",
+    "· 셀을 다시 실행하거나 출력을 지워도 학습 기록은 초기화되지 않아요. 처음부터 다시 하려면 /reset-all 을 입력해 주세요.",
+    "· 입력창이 사라지면 이 셀을 다시 실행해 주세요. 학습 기록은 그대로 이어져요.",
+]
+
+
+def _show_intro():
+    for line in INTRO_LINES:
+        print(line)
+    if not any(rec.get("skill_registry") for rec in concept_records.values()) and os.path.exists(SAVE_FILE):
+        print(f"· 이전에 저장한 학습 기록({SAVE_FILE})이 있어요. 이어서 하려면 /load 를 입력해 주세요.")
+    if messages:
+        # 입력창이 사라져 셀을 다시 실행한 경우: 마지막 튜터 메시지를 보여 주고 이어서 진행한다.
+        last = next((m["content"] for m in reversed(messages) if m.get("role") == "assistant"), "")
+        print("\n[이어서 진행해요] 마지막 튜터 메시지:")
+        if last:
+            display(Markdown(last))
+
+
+def handle_command(user_input):
+    """슬래시 명령어를 처리한다. 앱을 종료해야 하면 "exit"를 돌려준다. 명령어가 아니면 None."""
     global SHOW_CONTROLLER_DEBUG, learning_phase, awaiting_registry_confirmation, pending_study_strategy
-    print("STUDY LLM 시작. 공부하고 싶은 내용을 편하게 입력해 주세요.")
+    cmd = user_input.strip().lower()
+    if cmd == "/exit":
+        export_records()
+        print("종료합니다.")
+        return "exit"
+    elif cmd == "/new-topic":
+        pending_study_strategy = None
+        pending_start_requests.clear()
+        learning_context.update({"topic": "", "goal": "", "concept_id": ""})
+        messages.clear()
+        learning_phase = "awaiting_topic"
+        awaiting_registry_confirmation = False
+        print("새 학습 주제를 입력해 주세요. 이전 학습 기록은 보존돼요.")
+    elif cmd == "/progress":
+        show_progress()
+    elif cmd == "/debug":
+        SHOW_CONTROLLER_DEBUG = not SHOW_CONTROLLER_DEBUG
+        print("개발자 로그:", "켜짐" if SHOW_CONTROLLER_DEBUG else "꺼짐")
+    elif cmd == "/audit":
+        audit_logs()
+    elif cmd == "/finish":
+        finish_unit()
+    elif cmd == "/export":
+        export_records()
+    elif cmd == "/load":
+        load_records()
+    elif cmd == "/reset-chat":
+        reset_conversation()
+    elif cmd == "/reset-all":
+        reset_all_records(confirm=False)
+    elif cmd == "/reset-all confirm":
+        reset_all_records(confirm=True)
+    elif cmd == "/help":
+        print_help()
+    elif user_input.strip().startswith("/"):
+        print("알 수 없는 명령이에요. /help로 명령어 목록을 볼 수 있어요.")
+    else:
+        return None
+    return "ok"
+
+
+def _run_chat_loop():
+    """입력창을 input()으로 받는 기본 방식 (ipywidgets를 쓸 수 없을 때의 대체 방식)."""
     while True:
         user_input = input("\nYou: ").strip()
-        cmd = user_input.lower()
-        if cmd == "/exit":
-            export_records()
-            print("종료합니다.")
+        if not user_input:
+            continue
+        res = handle_command(user_input)
+        if res == "exit":
             break
-        elif cmd == "/new-topic":
-            pending_study_strategy = None
-            pending_start_requests.clear()
-            learning_context.update({"topic": "", "goal": "", "concept_id": ""})
-            messages.clear()
-            learning_phase = "awaiting_topic"
-            awaiting_registry_confirmation = False
-            print("새 학습 주제를 입력해 주세요. 이전 학습 기록은 보존돼요.")
-        elif cmd == "/progress":
-            show_progress()
-        elif cmd == "/debug":
-            SHOW_CONTROLLER_DEBUG = not SHOW_CONTROLLER_DEBUG
-            print("개발자 로그:", "켜짐" if SHOW_CONTROLLER_DEBUG else "꺼짐")
-        elif cmd == "/audit":
-            audit_logs()
-        elif cmd == "/finish":
-            finish_unit()
-        elif cmd == "/export":
-            export_records()
-        elif cmd == "/load":
-            load_records()
-        elif cmd == "/reset-chat":
-            reset_conversation()
-        elif cmd == "/help":
-            print_help()
-        elif user_input.startswith("/"):
-            print("알 수 없는 명령이에요. /help로 명령어 목록을 볼 수 있어요.")
-        elif user_input:
+        if res is None:
             study_turn(user_input)
             _autosave()
+
+
+def _md_to_html(text):
+    """응답의 간단한 마크다운(**굵게**, `코드`, 줄바꿈)만 HTML로 바꾼다."""
+    t = html.escape(str(text))
+    t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
+    t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
+    return f'<div style="white-space:pre-wrap;margin:6px 0">{t}</div>'
+
+
+class _TranscriptView:
+    """대화 기록을 HTML 위젯 하나에 쌓는다. Output 위젯은 마지막 출력이 다음 입력 때까지 늦게 그려지는 문제가 있지만
+    위젯 값(value)은 바뀌는 즉시 화면에 반영된다. print는 모아 두었다가 display 직전과 턴이 끝날 때 한 덩어리로 넣는다."""
+    def __init__(self, view):
+        self.view = view
+        self.frags = []
+        self.buf = []
+        self.pending = ""
+
+    def write(self, text):
+        if text:
+            self.buf.append(text)
+        return len(text or "")
+
+    def flush(self):
+        pass
+
+    def refresh(self):
+        tail = f'<div style="color:#94a3b8;margin:6px 0">{html.escape(self.pending)}</div>' if self.pending else ""
+        self.view.value = "".join(self.frags) + tail
+
+    def send(self):
+        text = "".join(self.buf).strip("\n")
+        self.buf = []
+        if text:
+            self.frags.append(f'<div style="white-space:pre-wrap;margin:6px 0">{html.escape(text)}</div>')
+        self.refresh()
+
+    def display(self, *objs, **_):
+        self.send()                      # display 앞의 print를 먼저 넣어 순서를 지킨다
+        for o in objs:
+            data = getattr(o, "data", o)
+            if type(o).__name__ == "HTML":
+                self.frags.append(str(data))
+            else:
+                self.frags.append(_md_to_html(data))
+        self.refresh()
+
+
+def _run_chat_widget():
+    """v3.14: 입력창을 위젯으로 만든다. 커널이 input()에서 멈춰 있지 않아서, 다른 탭을 다녀오거나 오래 두어도
+    입력창이 사라지는 문제가 줄어들고, 사라져도 이 셀을 다시 실행하면 기록 그대로 이어진다."""
+    import ipywidgets as widgets
+    from IPython.display import display as _display
+    view = widgets.HTML(value="")
+    box = widgets.Text(placeholder="메시지를 입력하고 Enter를 누르세요", layout=widgets.Layout(width="82%"))
+    btn = widgets.Button(description="보내기", button_style="primary", layout=widgets.Layout(width="15%"))
+    state = {"busy": False, "done": False}
+    stream = _TranscriptView(view)
+
+    def _submit(_=None):
+        if state["busy"] or state["done"]:
+            return
+        text = (box.value or "").strip()
+        if not text:
+            return
+        state["busy"] = True
+        box.value = ""
+        box.disabled = True
+        btn.disabled = True
+        res = None
+        g = globals()
+        old_display, old_stdout = g["display"], sys.stdout
+        g["display"] = stream.display           # study_turn 안의 display(Markdown/HTML)도 같은 기록에 넣는다
+        sys.stdout = stream                     # print도 같은 기록에 넣는다
+        try:
+            print("You:", text)
+            stream.pending = "답변을 만드는 중…"
+            stream.send()                       # 내 입력은 바로 화면에 보이게 한다
+            try:
+                res = handle_command(text)
+                if res is None:
+                    study_turn(text)
+                    _autosave()
+            except Exception as exc:            # 한 턴의 오류가 입력창을 죽이지 않게 한다
+                print("오류가 났어요. 같은 내용을 다시 입력해 주세요:", repr(exc))
+        finally:
+            stream.pending = ""
+            stream.send()
+            g["display"], sys.stdout = old_display, old_stdout
+        state["busy"] = False
+        if res == "exit":
+            state["done"] = True
+            return
+        box.disabled = False
+        btn.disabled = False
+
+    box.on_submit(_submit)
+    btn.on_click(_submit)
+    _display(widgets.VBox([view, widgets.HBox([box, btn])]))
+    return {"view": view, "box": box, "btn": btn, "submit": _submit}
+
+
+def run_chat(use_widget=True):
+    _show_intro()
+    if use_widget:
+        try:
+            return _run_chat_widget()
+        except Exception as exc:
+            print("(입력 위젯을 쓸 수 없어 기본 입력 방식으로 진행해요:", repr(exc), ")")
+    _run_chat_loop()

@@ -10,19 +10,41 @@
   const ACTION_LABEL = {
     diagnostic_question: "진단 질문", diagnose_misconception: "오개념 확인 질문", guided_question: "유도 질문(이유 확인)",
     hint: "힌트 한 단계", partial_explanation: "부분 설명", prerequisite_explanation: "선행 개념으로 돌아가기",
-    full_explanation: "설명 + 확인 질문", reveal_and_next: "답 안내 후 다음 개념", advance_next: "다음 개념으로",
+    full_explanation: "설명 + 확인 질문", reasoning_question: "이유 질문 (R 단계)", transfer_question: "적용 질문 (T 단계)", reveal_and_next: "답 안내 후 다음 개념", advance_next: "다음 개념으로",
     practice: "연습 문제", review: "복습 질문", review_done: "복습 완료", review_reveal: "복습 답 안내",
     wrap_up_check: "마무리 확인 질문", wrap_up_summary: "마무리 요약", closing_ack: "마무리 인사", pause_ack: "잠시 멈춤",
     progress_report: "진행 상황 안내", offer_direction_choice: "방향 선택 제안", next_unit_choice: "다음 단원 선택",
     goal_clarification: "목적지 확인", offer_learner_choice: "학습자 선택 제안"
   };
   const DIM_LABEL = { concept: "C", reasoning: "R", transfer: "T" };
+  const STAGE_LABEL = { C: "지금: 개념", R: "지금: 이유", T: "지금: 적용", done: "완료" };   // v3.14 per_skill C→R→T
   const DIM_KO = { confirmed: "확인", partial: "부분", missing: "보완", unknown: "미확인" };
   const SOURCE_KO = { independent_explanation: "스스로 설명", independent_transfer: "스스로 적용", hint_assisted: "힌트 후",
     ai_echo: "AI 말 따라함", answer_only: "답만", unknown: "-" };
   const AUX1 = new Set(["goal_clarification", "offer_direction_choice", "next_unit_choice", "offer_learner_choice"]);
 
   const SCENARIOS = [
+    { id: "stress3", title: "스트레스 테스트 15턴 · 효소 (Demo 3 · 4절)",
+      desc: "모호한 질문, 반복 ‘모르겠어요’, 따라 말하기, 질문형·평서형 오개념, 설명 요청, 주제 이탈, 넘기기, ‘여기까지’, 마무리까지 15개 발화를 한 세션에서 실행해요. 4-1 표의 판정(○/△/×)과 비교해 보세요. 턴이 많아 반복 1회를 권장해요.",
+      lines: ["효소가 활성화에너지를 낮추는 원리가 뭔지 잘 모르겠어", "좋아요",
+        "음... 활성화 에너지가 뭔가 어려운 개념인 것 같아", "잘 모르겠어요", "잘 모르겠어요",
+        "활성화에너지는 반응물이 전이상태까지 올라가는 데 필요한 에너지고, 이 에너지가 낮아지면 같은 온도에서도 전이상태에 도달하는 분자가 많아져서 반응 속도가 빨라지는 거야",
+        "효소가 활성화 에너지를 낮추는 건 반응물에 에너지를 직접 공급해 주기 때문인 거야?",
+        "효소가 반응물에 에너지를 직접 공급해서 활성화 에너지가 낮아지는 거야", "그냥 알려줘",
+        "배치상의 변화는 기질을 가까이 모아서 올바른 방향으로 배치하는 거야. 그래서 전이상태로 가기 쉬운 경로가 만들어져서 활성화에너지가 낮아지는 거야",
+        "근데 갑자기 궁금한데 ATP는 왜 에너지 화폐라고 해?", "이건 아니까 넘겨줘", "오늘은 여기까지 하자",
+        "이제 학습 끝내고 마무리 확인해줘", "모르겠어요",
+        "전이상태는 에너지가 제일 높은 불안정한 순간인데, 효소가 이걸 안정화시켜서 에너지 장벽이 낮아지게 하니까 중요해",
+        "효소가 반응이 다른 경로로 가게 해서 활성화에너지가 더 낮은 길로 진행되게 하는 거라고 생각해"] },
+    { id: "ab3", title: "상용 LLM vs STUDY A/B 3턴 (Demo 3 · 3절)",
+      desc: "‘Baseline도 함께 실행’을 켜면 같은 3개 발화를 컨트롤러 없는 모델과 나란히 비교해요. 초기 대응(하위 개념 확인), 막혔을 때 힌트, 설명 뒤 확인 질문을 봐요.",
+      lines: ["효소가 활성화 에너지를 낮추는 원리가 뭔지 잘 모르겠어.", "효소가 반응 속도를 빠르게 하는 이유가 뭐야?",
+        "활성화 에너지를 낮추기 때문인 건 아는데, 효소가 왜 활성화 에너지를 낮출 수 있는지는 잘 모르겠어."] },
+    { id: "fail3", title: "실패 사례 재확인 · 부족한 이유 / 질문형 오개념 (Demo 3 · 5절)",
+      desc: "실패 사례 1(드러난 Reasoning 부족을 건너뜀)과 2(질문형 오개념에 정답부터 설명)가 v3.14에서도 나오는지 확인해요.",
+      lines: ["효소가 활성화에너지를 낮추는 원리가 뭔지 잘 모르겠어", "좋아요",
+        "활성화 에너지는 반응이 일어나기 위해 필요한 최소 에너지라는 건 알고 있어. 효소가 기질을 active site에 모아서 반응이 더 쉽게 일어나게 하는 것도 아는데, 그게 왜 활성화 에너지를 낮추는지는 잘 모르겠어.",
+        "효소가 활성화 에너지를 낮추는 건 반응물에 에너지를 직접 공급해 주기 때문인 거야?"] },
     { id: "field", title: "전기장과 전위 (Demo 2 · 3-1 첫 번째 대화)",
       desc: "오개념 확인 → 이유 → 적용 순서로 근거를 쌓는지, 고쳤던 오개념이 다시 나올 때 한 단계씩 내리는지 확인해요.",
       lines: ["전기장이랑 전위가 어떻게 다른지 잘 모르겠어.", "좋아요, 그대로 진행해 주세요.",
@@ -317,7 +339,8 @@
   const COMMAND_HELP = [
     ["/progress", "하위 개념별 진행 상황(오른쪽 패널)으로 이동"], ["/finish", "지금 단계를 마무리하고 미확인 부분을 점검"],
     ["/new-topic", "새 학습 주제 시작 (이전 기록 보존)"], ["/reset-chat", "대화 문맥만 비우기 (State·기록 유지)"],
-    ["/export", "학습 기록 파일로 내보내기"], ["/debug", "연구자 모드 켜기/끄기"], ["/audit", "규칙 검사 결과 보기"], ["/help", "명령어 목록"]
+    ["/export", "학습 기록 파일로 내보내기"], ["/debug", "연구자 모드 켜기/끄기"], ["/audit", "규칙 검사 결과 보기"],
+    ["/reset-all", "모든 학습 기록을 지우고 처음부터 시작"], ["/help", "명령어 목록"]
   ];
   function systemMsg(text) { store.learn.chat.push({ id: uid(), role: "system", content: text, ts: nowIso() }); renderChat(); save(); }
 
@@ -333,7 +356,8 @@
       if (cmd === "/export") return exportRecords();
       if (cmd === "/debug") { store.settings.research = !store.settings.research; applyResearch(); save(); return toast("연구자 모드 " + (store.settings.research ? "켜짐" : "꺼짐")); }
       if (cmd === "/audit") return switchTab("records");
-      if (cmd === "/help") return systemMsg("사용할 수 있는 명령어예요.\n" + COMMAND_HELP.map(([c, d]) => `${c}  ${d}`).join("\n") + "\n명령어가 아닌 문장은 그대로 학습 대화로 이어져요.");
+      if (cmd === "/reset-all" || cmd === "/reset-all confirm") return resetAllRecords();
+      if (cmd === "/help") return systemMsg("사용할 수 있는 명령어예요.\n" + COMMAND_HELP.map(([c, d]) => `${c}  ${d}`).join("\n") + "\n명령어가 아닌 문장은 그대로 학습 대화로 이어져요.\n핵심 용어는 기본으로 한국어(English)로 함께 써요. 오른쪽 '학습 관리'에서 바꾸거나 '용어는 한국어로만 써 줘'라고 말해도 돼요.");
       return systemMsg("알 수 없는 명령이에요. /help로 명령어 목록을 볼 수 있어요.");
     }
     store.learn.chat.push({ id: uid(), role: "user", content: text, ts: nowIso() });
@@ -353,6 +377,33 @@
     runLearnCommand(b.dataset.cmd, "", map[b.dataset.cmd]);
   }));
   $("#helpBtn").addEventListener("click", () => send("/help"));
+
+  // 학습 관리 패널 (Demo 3 · 6-3: 조회·관리 기능은 LLM 호출 없이 UI 에서 처리)
+  $("#commandList").innerHTML = COMMAND_HELP.map(([c, d]) => `<button type="button" class="cmd" data-cmdtext="${esc(c)}"><code>${esc(c)}</code><span>${esc(d)}</span></button>`).join("");
+  $("#commandList").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-cmdtext]"); if (!b) return;
+    input.value = b.dataset.cmdtext; autosize(input); input.focus();
+  });
+  $$("[data-manage]").forEach((b) => b.addEventListener("click", () => {
+    const m = b.dataset.manage;
+    if (m === "export") return exportRecords();
+    switchTab("learn");
+    const map = { finish: "/finish", new_topic: "/new-topic", reset_chat: "/reset-chat" };
+    runLearnCommand(m, "", map[m]);
+  }));
+  function termStyle() { return ((store.learn.state || {}).learner_prefs || {}).term_style || "bilingual"; }
+  function renderTermStyle() {
+    const cur = termStyle();
+    $$("[data-term]").forEach((b) => { const on = b.dataset.term === cur; b.classList.toggle("on", on); b.setAttribute("aria-checked", on); });
+  }
+  $$("[data-term]").forEach((b) => b.addEventListener("click", () => {
+    if (busy) return toast("응답을 받는 중이에요. 끝난 뒤 바꿔 주세요.");
+    // the server reads learner_prefs from the state sent with the next turn, so no API call is needed here
+    store.learn.state = store.learn.state || {};
+    store.learn.state.learner_prefs = Object.assign({}, store.learn.state.learner_prefs, { term_style: b.dataset.term });
+    save(); renderTermStyle();
+    toast(b.dataset.term === "korean" ? "다음 응답부터 핵심 용어를 한국어로만 써요." : "다음 응답부터 핵심 용어를 한국어(English)로 함께 써요.");
+  }));
 
   // logo → back to the start screen. Same as /new-topic on the server (topic and chat context
   // are cleared; learning records and the weak-concept note are kept), then the welcome screen.
@@ -380,6 +431,7 @@
 
   // side panel
   function renderSide() {
+    renderTermStyle();
     const p = store.learn.progress;
     const body = $("#progressBody");
     if (!p || !p.skills || !p.skills.length) {
@@ -391,9 +443,11 @@
         + p.skills.map((s, i) => {
           let note = s.unvisited ? "아직 시작하지 않음" : (closedText[s.closed] || "");
           if (s.closed === "confirmed" && s.needs_recheck && !s.rechecked) note = "도움을 받고 통과 · 마무리에서 재확인";
+          if (s.deepen_incomplete) note = "이유·적용은 다 확인하지 못하고 넘어감 · 마무리 요약에서 안내";
+          const stage = !s.unvisited && STAGE_LABEL[s.stage] && p.progression_mode === "per_skill" ? `<span class="stage-chip">${esc(STAGE_LABEL[s.stage])}</span>` : "";
           const d = s.dimensions || {};
           return `<div class="skill ${s.active ? "active" : ""}"><div class="skill-top"><span class="skill-name">${i + 1}. ${esc(s.label)}</span>${statePill(s.state)}</div>`
-            + `<div class="skill-dims">${dimMini("concept", d.concept)}${dimMini("reasoning", d.reasoning)}${dimMini("transfer", d.transfer)}</div>`
+            + `<div class="skill-dims">${dimMini("concept", d.concept)}${dimMini("reasoning", d.reasoning)}${dimMini("transfer", d.transfer)}${stage}</div>`
             + (note ? `<div class="skill-note">${esc(note)}</div>` : "") + `</div>`;
         }).join("")
         + `<div class="small muted">현재 단위 취약도: ${esc({ unknown: "아직 평가되지 않음", low: "낮음", moderate: "보통", high: "높음" }[p.vulnerability] || p.vulnerability)}</div>`;
@@ -725,7 +779,8 @@
   function exportRecords() {
     const st = store.learn.state || {};
     const payload = {
-      version: 3.13, saved_at: nowIso().slice(0, 19),
+      version: 3.14, saved_at: nowIso().slice(0, 19),
+      learner_prefs: st.learner_prefs || { term_style: "bilingual" },
       learning_context: st.learning_context || { topic: "", goal: "", concept_id: "" },
       concept_records: st.concept_records || {}, logs: st.logs || [],
       session: { learning_phase: st.learning_phase || "idle", awaiting_registry_confirmation: !!st.awaiting_registry_confirmation,
@@ -747,7 +802,8 @@
         messages: sess.messages || [], learning_phase: sess.learning_phase || (p.learning_context.topic ? "learning" : "idle"),
         awaiting_registry_confirmation: !!sess.awaiting_registry_confirmation, pending_new_unit: !!sess.pending_new_unit,
         pending_study_strategy: sess.pending_study_strategy || null, pending_start_requests: sess.pending_start_requests || [],
-        pending_post_explanation_check: !!(p.web && p.web.pending_post_explanation_check) };
+        pending_post_explanation_check: !!(p.web && p.web.pending_post_explanation_check),
+        learner_prefs: p.learner_prefs || { term_style: "bilingual" } };
       const r = await api("/api/turn", turnBody("progress", "", state));
       store.learn.state = r.state; store.learn.progress = r.progress; store.learn.units = r.units;
       store.learn.chat = (p.web && p.web.chat) || (state.messages || []).map((m) => ({ id: uid(), role: m.role === "user" ? "user" : "bot", kind: "text", content: m.content, ts: nowIso() }));
@@ -765,10 +821,12 @@
     for (const l of logs) { const c = l.rule_check || {}; rows.push(keys.map((k) => Array.isArray(l[k]) ? l[k].join("·") : l[k]).concat([c.chars_ok, c.questions_ok, c.state_step_ok, c.tone_ok])); }
     download(`study_logs_${stamp()}.csv`, csv(rows), "text/csv");
   });
-  $("#recReset").addEventListener("click", () => {
+  function resetAllRecords() {
+    if (busy) return toast("응답을 받는 중이에요. 끝난 뒤 다시 시도해 주세요.");
     if (!confirm("학습 기록, 대화, 로그를 모두 지울까요? (피드백 설문은 유지돼요)")) return;
     store.learn = { state: null, chat: [], progress: null, units: [] }; save(); renderChat(); renderSide(); renderRecords(); toast("초기화했어요.");
-  });
+  }
+  $("#recReset").addEventListener("click", resetAllRecords);
 
   // ------------------------------------------------------------------ boot
   applyResearch(); renderChat(); renderSide(); renderCompare(); renderSurvey(); renderLab(); checkHealth();

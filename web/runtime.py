@@ -22,6 +22,7 @@ STATE_KEYS = [
     "learning_context", "concept_records", "messages", "logs",
     "pending_post_explanation_check", "learning_phase", "awaiting_registry_confirmation",
     "pending_new_unit", "pending_study_strategy", "pending_start_requests",
+    "learner_prefs",          # v3.14: 용어 표기 선호 (한국어 / 한국어(English))
 ]
 MAX_MESSAGES_KEPT = 40   # the controller only reads the last 6-8 messages
 
@@ -43,8 +44,13 @@ def _load_state(ns: dict, state: dict | None) -> None:
     state = state or {}
     for key in STATE_KEYS:
         if key in state and state[key] is not None:
+            if key == "learner_prefs":
+                # the core's functions hold a reference to the module-level dict, so update it in place
+                ns["learner_prefs"].update(copy.deepcopy(state[key]))
+                continue
             ns[key] = copy.deepcopy(state[key])
     # same migrations the notebook applies in load_records()
+    ns["learner_prefs"].setdefault("term_style", ns["DEFAULT_TERM_STYLE"])
     ns["learning_context"].setdefault("concept_id", "")
     for rec in ns["concept_records"].values():
         base = ns["_new_record"]()
@@ -85,6 +91,8 @@ def _progress(ns: dict) -> dict:
             "revealed": bool(sk.get("revealed")),
             "rechecked": bool(sk.get("rechecked")),
             "needs_recheck": bool(sk.get("needs_recheck")),
+            "stage": sk.get("stage", "C"),                       # v3.14 per_skill: C → R → T → done
+            "deepen_incomplete": bool(sk.get("deepen_incomplete")),
             "misconceptions": sk.get("misconceptions", [])[-3:],
             "key_points": sk.get("key_points", []),
             "active": item.get("skill_id") == record.get("active_skill_id"),
@@ -102,6 +110,7 @@ def _progress(ns: dict) -> dict:
         "skills": skills, "done": done, "total": len(skills), "where": where,
         "vulnerability": p.get("vulnerability", "unknown"), "unit_status": record.get("unit_status"),
         "wrap_up_active": bool(record.get("wrap_up_active")), "phase": ns["learning_phase"],
+        "progression_mode": ns.get("PROGRESSION_MODE"), "term_style": ns["learner_prefs"].get("term_style"),
     }
 
 

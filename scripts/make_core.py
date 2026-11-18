@@ -1,6 +1,6 @@
 """Builds study_core.py from the notebook (cells 0-4) with web-safe patches."""
 import json, sys
-nb = json.load(open(sys.argv[1]))
+nb = json.load(open(sys.argv[1], encoding="utf-8"))
 cells = [''.join(c['source']) for c in nb['cells']]
 
 def rep(src, old, new, count=1):
@@ -41,13 +41,13 @@ def _trace_event(event):
 
 c3 = cells[3]
 # 보조 규칙 2 (취약 개념 재확인): 다른 학습 단위에서 기록된 오개념을 첫 진단 질문에 반영한다.
-c3 = rep(c3, '''        q = client.responses.create(model=MODEL, instructions=START_CONFIRM_PROMPT,
+c3 = rep(c3, '''        q = client.responses.create(model=MODEL, instructions=START_CONFIRM_PROMPT + _pref_instruction(),
             input=json.dumps({"topic": learning_context["topic"], "goal": learning_context["goal"],
                               "first_skill": label, "instruction": "Ask one diagnostic question only. Output polite Korean (해요체)."}, ensure_ascii=False))''',
 '''        prior_vulnerable = _cross_unit_vulnerabilities(learning_context.get("concept_id"))
         confirm_input = {"topic": learning_context["topic"], "goal": learning_context["goal"],
                          "first_skill": label, "instruction": "Ask one diagnostic question only. Output polite Korean (해요체)."}
-        confirm_instructions = START_CONFIRM_PROMPT
+        confirm_instructions = START_CONFIRM_PROMPT + _pref_instruction()
         if prior_vulnerable:
             confirm_input["prior_misconceptions_from_other_units"] = prior_vulnerable
             confirm_instructions = START_CONFIRM_PROMPT + PRIOR_VULNERABILITY_RULE
@@ -90,11 +90,11 @@ def _cross_unit_vulnerabilities(current_cid=None, limit=5):
 '''
 
 core = "\n\n\n".join([
-    '"""STUDY LLM controller core — notebook v3.13 port for the web.\n\nGenerated from STUDY_LLM_modified.ipynb (cells 0-4) by scripts/make_core.py.\nController logic, prompts and state rules are unchanged; only Colab/IPython I/O was replaced\nand auxiliary rule 2 (cross-unit vulnerability re-check) was added.\n"""',
+    '"""STUDY LLM controller core — notebook v3.14 port for the web.\n\nGenerated from notebook/STUDY_LLM_v3_14.ipynb (cells 0-4) by scripts/make_core.py.\nController logic, prompts and state rules are unchanged; only Colab/IPython I/O was replaced\nand auxiliary rule 2 (cross-unit vulnerability re-check) was added.\n"""',
     c0, cells[1], cells[2], c3, cells[4]])
-open(sys.argv[2], "w").write(core)
+open(sys.argv[2], "w", encoding="utf-8").write(core)
 
-# notebook regression tests (cells 5-8) as one script that runs after the core
-tests = "\n\n".join(cells[5:9])
-open(sys.argv[3], "w").write(tests)
+# notebook regression tests (cells 5-9) as one script that runs after the core
+tests = "\n\n".join(cells[5:10])
+open(sys.argv[3], "w", encoding="utf-8").write(tests)
 print("ok", len(core.splitlines()), "lines core;", len(tests.splitlines()), "lines tests")
